@@ -7,12 +7,17 @@ table_output <- function(output_id) {
   if (DT_AVAILABLE) DT::dataTableOutput(output_id) else tableOutput(output_id)
 }
 
-render_csl_table <- function(expr, page_length = 25, editable = FALSE) {
+render_csl_table <- function(expr, page_length = 25, editable = FALSE, scroll_y = "520px") {
   if (DT_AVAILABLE) {
     DT::renderDataTable({
       df <- expr
       if (!NROW(df)) df <- data.frame()
-      DT::datatable(df, editable = editable, rownames = FALSE, options = list(scrollX = TRUE, pageLength = page_length))
+      DT::datatable(
+        df,
+        editable = editable,
+        rownames = FALSE,
+        options = list(scrollX = TRUE, scrollY = scroll_y, pageLength = page_length)
+      )
     })
   } else {
     renderTable({
@@ -734,10 +739,17 @@ read_log_excerpt <- function(path, mode = "tail", n = 120) {
 }
 
 active_job_steps <- function(project) {
+  names(active_job_state_map(project))
+}
+
+active_job_state_map <- function(project) {
   jobs <- job_history(project)
-  if (!NROW(jobs) || !"slurm_state" %in% names(jobs)) return(character(0))
+  if (!NROW(jobs) || !"slurm_state" %in% names(jobs)) return(setNames(character(0), character(0)))
   active_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
-  unique(jobs$step[jobs$slurm_state %in% active_states])
+  jobs <- jobs[jobs$slurm_state %in% active_states, , drop = FALSE]
+  if (!NROW(jobs)) return(setNames(character(0), character(0)))
+  out <- tapply(jobs$slurm_state, jobs$step, function(x) tail(x, 1))
+  unlist(out)
 }
 
 normalize_pipeline_status <- function(status) {
@@ -749,9 +761,8 @@ project_status <- function(project) {
   data_dir <- project$data_dir
   design <- project$design_matrix_path
   raw <- data.frame(
-    step = c("Setup", "Design matrix", "FASTQ reads", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA"),
+    step = c("Design matrix", "FASTQ reads", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA"),
     status = c(
-      if (nzchar(project$name)) "Complete" else "Not started",
       if (file.exists(design)) "Complete" else "Not started",
       if (dir.exists(project$fastq_dir) && length(fastq_files(project$fastq_dir))) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
@@ -765,7 +776,6 @@ project_status <- function(project) {
       if (count_files(file.path(data_dir, "gseapy"), "\\.(csv|txt|png|pdf)$") > 0) "Complete" else "Not started"
     ),
     path = c(
-      dirname(data_dir),
       design,
       project$fastq_dir,
       file.path(data_dir, "fastqc"),
@@ -793,14 +803,26 @@ status_rank <- function(status) {
   match(status, c("Active", "Complete", "Not started"), nomatch = 99)
 }
 
+pipeline_order <- function() {
+  c("Design matrix", "FASTQ reads", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA")
+}
+
+step_order <- function(step) {
+  match(step, pipeline_order(), nomatch = length(pipeline_order()) + seq_along(step))
+}
+
+status_label <- function(status) {
+  ifelse(identical(status, "Active"), "In progress", status)
+}
+
 status_pill <- function(status) {
   cls <- switch(status, "Active" = "active", "Complete" = "complete", "not-started")
-  tags$span(class = paste("status-pill", cls), status)
+  tags$span(class = paste("status-pill", cls), status_label(status))
 }
 
 status_cards <- function(df) {
   if (!NROW(df)) return(div(class = "empty-box", "No steps available."))
-  df <- df[order(status_rank(df$status), df$step), , drop = FALSE]
+  df <- df[order(step_order(df$step)), , drop = FALSE]
   tagList(lapply(seq_len(NROW(df)), function(i) {
     div(class = "status-card",
         div(class = "status-card-top",
@@ -813,24 +835,113 @@ status_cards <- function(df) {
   }))
 }
 
-sample_progress <- function(project) {
-  design <- safe_read_table(project$design_matrix_path)
-  if (!NROW(design) || !"sample" %in% names(design)) return(data.frame())
+sample_output_target <- function(project, sample, step) {
   data_dir <- project$data_dir
-  rows <- lapply(seq_len(NROW(design)), function(i) {
-    sample <- as.character(design$sample[i])
-    data.frame(
-      sample = sample,
-      FastQC = if (count_files(file.path(data_dir, "fastqc"), paste0(sample, ".*\\.html$")) > 0 || count_files(file.path(data_dir, "fastqc_cutadapt"), paste0(sample, ".*\\.html$")) > 0) "ready" else "missing",
-      Trim = if (count_files(file.path(data_dir, "cutadapt"), paste0(sample, ".*", fastq_suffix_regex)) > 0) "ready" else "missing",
-      STAR = if (file.exists(file.path(data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam")))) "ready" else "missing",
-      RSEM_optional = if (file.exists(file.path(data_dir, "rsem", sample, paste0(sample, ".genes.results")))) "ready" else "optional",
-      Kallisto_optional = if (file.exists(file.path(data_dir, "kallisto", sample, "abundance.tsv"))) "ready" else "optional",
-      featureCounts = if (file.exists(file.path(data_dir, "featurecounts", sample, paste0(sample, "_counts.txt")))) "ready" else "missing",
-      stringsAsFactors = FALSE
+  if (identical(step, "FastQC")) {
+    hits <- c(
+      list.files(file.path(data_dir, "fastqc"), pattern = paste0(sample, ".*\\.html$"), full.names = TRUE),
+      list.files(file.path(data_dir, "fastqc_cutadapt"), pattern = paste0(sample, ".*\\.html$"), full.names = TRUE)
     )
-  })
-  do.call(rbind, rows)
+    return(hits[1] %||% file.path(data_dir, "fastqc", paste0(sample, "_fastqc.html")))
+  }
+  switch(step,
+    "Cutadapt" = {
+      pairs <- sample_fastq_pairs(project, FALSE)
+      hit <- pairs[pairs$sample == sample, , drop = FALSE]
+      if (NROW(hit)) file.path(data_dir, "cutadapt", basename(hit$r1[1])) else file.path(data_dir, "cutadapt", paste0(sample, ".fastq.gz"))
+    },
+    "STAR" = file.path(data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam")),
+    "RSEM optional" = file.path(data_dir, "rsem", sample, paste0(sample, ".genes.results")),
+    "Kallisto optional" = file.path(data_dir, "kallisto", sample, "abundance.tsv"),
+    "featureCounts" = file.path(data_dir, "featurecounts", sample, paste0(sample, "_counts.txt")),
+    ""
+  )
+}
+
+minimum_expected_bytes <- function(step) {
+  switch(step,
+    "FastQC" = 1000,
+    "Cutadapt" = 100,
+    "STAR" = 1000,
+    "RSEM optional" = 100,
+    "Kallisto optional" = 100,
+    "featureCounts" = 100,
+    1
+  )
+}
+
+file_size_for <- function(path) {
+  if (!nzchar(path %||% "") || !file.exists(path)) return(0)
+  info <- file.info(path)
+  as.numeric(info$size %||% 0)
+}
+
+previous_size_for <- function(cache, path) {
+  if (!NROW(cache) || !"path" %in% names(cache) || !"size" %in% names(cache)) return(NA_real_)
+  hit <- cache[cache$path == path, , drop = FALSE]
+  if (!NROW(hit)) return(NA_real_)
+  as.numeric(tail(hit$size, 1))
+}
+
+sample_progress <- function(project, active_states = active_job_state_map(project), previous_cache = data.frame()) {
+  design <- safe_read_table(project$design_matrix_path)
+  if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
+  sample_steps <- c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")
+  rows <- list()
+  cache_rows <- list()
+  for (sample in as.character(design$sample)) {
+    for (step in sample_steps) {
+      target <- sample_output_target(project, sample, step)
+      size <- file_size_for(target)
+      previous_size <- previous_size_for(previous_cache, target)
+      active <- step %in% names(active_states)
+      slurm_state <- if (active) active_states[[step]] else ""
+      min_size <- minimum_expected_bytes(step)
+      growing <- active && is.finite(previous_size) && size > previous_size
+      optional <- step %in% c("RSEM optional", "Kallisto optional")
+      status <- if (size >= min_size && !growing) {
+        "Completed"
+      } else if (active && slurm_state %in% c("PENDING", "CONFIGURING")) {
+        "Waiting"
+      } else if (active && growing) {
+        "Running"
+      } else if (active && size > 0) {
+        "Running, no growth yet"
+      } else if (active) {
+        "Waiting"
+      } else if (size > 0 && size < min_size) {
+        "Possibly incomplete"
+      } else if (optional) {
+        "Optional, not run"
+      } else {
+        "Not started"
+      }
+      note <- if (status == "Possibly incomplete") {
+        paste0("Output exists but is smaller than expected (<", min_size, " bytes).")
+      } else if (identical(status, "Running, no growth yet")) {
+        "File exists but size did not increase since the last refresh."
+      } else if (identical(status, "Running")) {
+        "Output file size increased since the last refresh."
+      } else {
+        ""
+      }
+      rows[[length(rows) + 1]] <- data.frame(
+        sample = sample,
+        step = step,
+        status = status,
+        slurm_state = slurm_state,
+        output_bytes = size,
+        target = target,
+        note = note,
+        stringsAsFactors = FALSE
+      )
+      cache_rows[[length(cache_rows) + 1]] <- data.frame(path = target, size = size, checked = as.character(Sys.time()), stringsAsFactors = FALSE)
+    }
+  }
+  out <- do.call(rbind, rows)
+  out <- out[order(out$sample, step_order(out$step)), , drop = FALSE]
+  cache <- do.call(rbind, cache_rows)
+  list(table = out, cache = cache)
 }
 
 save_job <- function(project, step, command, output = "") {
@@ -1105,19 +1216,21 @@ load_native_rnaseq_viewer <- function(project) {
 
 run_step_meta <- function() {
   data.frame(
-    order = seq_len(7),
-    step = c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "DESeq2"),
+    order = seq_along(pipeline_order()),
+    step = pipeline_order(),
     description = c(
+      "Create or load design_matrix.txt.",
+      "Raw reads are available.",
       "Generate per-read quality reports.",
       "Trim adapters and short reads.",
       "Align reads and write BAM files.",
       "Optional RSEM transcript/gene quantification.",
       "Optional Kallisto transcript quantification.",
       "Create gene-level count files.",
-      "Run differential expression and normalized counts."
+      "Build count_matrix.txt.",
+      "Run differential expression and normalized counts.",
+      "Run pathway analysis."
     ),
-    button = c("run_fastqc", "run_cutadapt", "run_star", "run_rsem", "run_kallisto", "run_featurecounts", "run_deseq2"),
-    label = c("Run FastQC", "Run cutadapt", "Run STAR", "Run RSEM", "Run Kallisto", "Run featureCounts", "Run DESeq2"),
     stringsAsFactors = FALSE
   )
 }
@@ -1131,7 +1244,7 @@ pipeline_stepper_ui <- function(project) {
     cls <- switch(st, "Complete" = "complete", "Active" = "active", "not-started")
     div(class = paste("pipeline-step", cls),
         div(class = "step-index", meta$order[i]),
-        div(class = "step-main", tags$strong(meta$step[i]), tags$span(st), if (nzchar(mode)) tags$em(mode) else NULL)
+        div(class = "step-main", tags$strong(meta$step[i]), tags$span(status_label(st)), if (nzchar(mode)) tags$em(mode) else NULL)
     )
   }))
 }
@@ -1234,9 +1347,6 @@ body { background:#eef3f8; color:#17202f; }
 .step-main span, .step-main em { font-size:12px; color:#657084; margin-top:3px; font-style:normal; }
 .log-viewer { max-height:620px; overflow:auto; background:#0d1623; color:#d9e8ff; border-radius:8px; border:1px solid #1f3857; padding:14px; }
 .button-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-.root-pill { background:#f8fafc; border:1px solid #d8dde8; border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:5px; }
-.root-pill span { font-size:11px; font-weight:700; color:#657084; text-transform:uppercase; letter-spacing:.03em; }
-.root-pill code { white-space:normal; color:#17202f; background:transparent; padding:0; font-size:11px; }
 .project-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 8px 20px rgba(15,23,36,.06); }
 .project-card-top { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:12px; }
 .project-title-wrap h3 { margin:2px 0 0 0; font-size:19px; font-weight:800; color:#17202f; overflow-wrap:anywhere; }
@@ -1257,6 +1367,10 @@ body { background:#eef3f8; color:#17202f; }
 .native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; margin:0 !important; }
 .native-results-host .hero { padding: 18px 22px 16px 22px !important; }
 .native-results-host .main-tabs { padding: 14px 14px 20px 14px !important; }
+.dataTables_wrapper { width:100%; }
+.dataTables_scrollBody { max-height:560px !important; }
+.native-results-host .dataTables_scrollBody { max-height:650px !important; overflow:auto !important; }
+.native-results-host .table, .native-results-host table { max-width:100%; }
 "
 
 ui <- fluidPage(
@@ -1274,8 +1388,6 @@ ui <- fluidPage(
       selectInput("analysis", "Analysis", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq", "All analyses"), selected = "RNA-seq"),
       uiOutput("project_ui"),
       uiOutput("new_project_ui"),
-      tags$hr(),
-      div(class = "root-pill", tags$span("CodeSpringLab root"), tags$code(CSL_ROOT)),
       tags$hr(),
       uiOutput("project_card")
     ),
@@ -1332,6 +1444,8 @@ server <- function(input, output, session) {
   run_message <- reactiveVal("")
   progress_refresh <- reactiveVal(Sys.time())
   native_registered_id <- reactiveVal("")
+  sample_size_cache <- reactiveVal(data.frame(path = character(), size = numeric(), checked = character(), stringsAsFactors = FALSE))
+  sample_progress_state <- reactiveVal(data.frame())
 
   filtered_projects <- reactive({
     p <- projects()
@@ -1500,7 +1614,7 @@ server <- function(input, output, session) {
     df <- project_status(current_project())
     filt <- input$progress_status_filter %||% "All"
     if (!identical(filt, "All")) df <- df[df$status == filt, , drop = FALSE]
-    df[order(status_rank(df$status), df$step), , drop = FALSE]
+    df[order(step_order(df$step)), , drop = FALSE]
   })
 
   observeEvent(input$refresh_progress, {
@@ -1517,9 +1631,15 @@ server <- function(input, output, session) {
 
   output$status_table <- render_csl_table(progress_status(), page_length = 20)
 
-  output$sample_progress_table <- render_csl_table({
+  observe({
     progress_refresh()
-    sample_progress(current_project())
+    res <- sample_progress(current_project(), active_job_state_map(current_project()), isolate(sample_size_cache()))
+    sample_size_cache(res$cache)
+    sample_progress_state(res$table)
+  })
+
+  output$sample_progress_table <- render_csl_table({
+    sample_progress_state()
   }, page_length = 25)
 
   output$active_jobs_table <- render_csl_table({
