@@ -291,6 +291,59 @@ discover_projects <- function() {
   projects
 }
 
+new_project_from_inputs <- function(input) {
+  key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
+  project_name <- clean_name(input$new_project_name %||% paste0("new_", key, "_project"), paste0("new_", key, "_project"))
+  label <- input$new_project_name %||% project_name
+  results_root <- normalizePath(path.expand(input$new_results_root %||% "~/csl_results"), winslash = "/", mustWork = FALSE)
+  data_dir <- file.path(results_root, project_name, "data")
+  design_path <- trimws(input$new_design_matrix_path %||% "")
+  if (!nzchar(design_path)) design_path <- file.path(data_dir, "manifest", "design_matrix.txt")
+  design_path <- normalizePath(path.expand(design_path), winslash = "/", mustWork = FALSE)
+  fastq_dir <- normalizePath(path.expand(input$new_fastq_dir %||% ""), winslash = "/", mustWork = FALSE)
+  paired <- !tolower(input$new_paired_end %||% "paired") %in% c("single", "se", "n", "no", "false")
+  list(
+    id = paste0(key, "/", project_name),
+    name = project_name,
+    label = label,
+    analysis = analysis_label(key),
+    analysis_key = key,
+    genome = tolower(input$new_genome %||% "mouse"),
+    paired_end = paired,
+    results_root = results_root,
+    data_dir = data_dir,
+    fastq_dir = fastq_dir,
+    design_matrix_path = design_path,
+    source_config = "",
+    source = "new project"
+  )
+}
+
+project_config_dir <- function(key) {
+  file.path(SCRIPTS_DIR, "project_configs", analysis_key(key))
+}
+
+write_project_config <- function(project) {
+  cfg_dir <- project_config_dir(project$analysis_key)
+  dir.create(cfg_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(project$data_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(dirname(project$design_matrix_path), recursive = TRUE, showWarnings = FALSE)
+  cfg_path <- file.path(cfg_dir, paste0(clean_name(project$name, "project"), ".py"))
+  lines <- c(
+    sprintf("analysis_type = %s", deparse(project$analysis_key)),
+    sprintf("project_name = %s", deparse(project$name)),
+    sprintf("results_directory = %s", deparse(with_slash(project$results_root))),
+    sprintf("visualizer_data_dir = %s", deparse(project$data_dir)),
+    sprintf("inpath_design = %s", deparse(dirname(project$design_matrix_path))),
+    sprintf("read_path_original = %s", deparse(project$fastq_dir)),
+    sprintf("read_path_destination = %s", deparse(project$fastq_dir)),
+    sprintf("genome = %s", deparse(project$genome)),
+    sprintf("pairing = %s", deparse(if (isTRUE(project$paired_end)) "y" else "n"))
+  )
+  writeLines(lines, cfg_path)
+  cfg_path
+}
+
 safe_read_table <- function(path, n = Inf) {
   if (!file.exists(path)) return(data.frame())
   ext <- tolower(tools::file_ext(path))
@@ -411,24 +464,44 @@ count_files <- function(path, pattern) {
   length(list.files(path, pattern = pattern, recursive = TRUE, full.names = TRUE))
 }
 
-active_job_steps <- function(project) {
-  if (!file.exists(JOBS_PATH)) return(character(0))
+extract_job_id <- function(x) {
+  m <- regexpr("job_id:[[:space:]]*[0-9]+", x)
+  if (m < 0) return("")
+  sub("job_id:[[:space:]]*", "", regmatches(x, m))
+}
+
+job_history <- function(project) {
+  if (!file.exists(JOBS_PATH)) return(data.frame())
   jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE), error = function(e) data.frame())
-  if (!NROW(jobs) || !"project" %in% names(jobs) || !"step" %in% names(jobs) || !"output" %in% names(jobs)) return(character(0))
+  if (!NROW(jobs) || !"project" %in% names(jobs) || !"step" %in% names(jobs) || !"output" %in% names(jobs)) return(data.frame())
   jobs <- jobs[jobs$project == project$name, , drop = FALSE]
-  if (!NROW(jobs)) return(character(0))
-  extract_job_id <- function(x) {
-    m <- regexpr("job_id:[[:space:]]*[0-9]+", x)
-    if (m < 0) return("")
-    sub("job_id:[[:space:]]*", "", regmatches(x, m))
-  }
+  if (!NROW(jobs)) return(data.frame())
   jobs$job_id <- vapply(as.character(jobs$output), extract_job_id, character(1))
-  ids <- jobs$job_id[nzchar(jobs$job_id)]
-  if (!length(ids) || !nzchar(Sys.which("squeue"))) return(character(0))
-  sq <- tryCatch(system2("squeue", c("-h", "-j", paste(unique(ids), collapse = ","), "-o", "%A"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
-  active_ids <- unique(trimws(sq[nzchar(sq)]))
-  if (!length(active_ids)) return(character(0))
-  unique(jobs$step[jobs$job_id %in% active_ids])
+  jobs$slurm_state <- ifelse(nzchar(jobs$job_id), "Submitted", "No job id")
+  ids <- unique(jobs$job_id[nzchar(jobs$job_id)])
+  if (length(ids) && nzchar(Sys.which("squeue"))) {
+    sq <- tryCatch(system2("squeue", c("-h", "-j", paste(ids, collapse = ","), "-o", "%A|%T"), stdout = TRUE, stderr = FALSE), error = function(e) character(0))
+    sq <- sq[nzchar(sq)]
+    if (length(sq)) {
+      parts <- strsplit(sq, "|", fixed = TRUE)
+      state_map <- setNames(vapply(parts, function(x) if (length(x) >= 2) x[2] else "Active", character(1)),
+                            vapply(parts, function(x) x[1], character(1)))
+      matched <- jobs$job_id %in% names(state_map)
+      jobs$slurm_state[matched] <- unname(state_map[jobs$job_id[matched]])
+      jobs$slurm_state[!matched & nzchar(jobs$job_id)] <- "Finished or not in queue"
+    } else {
+      jobs$slurm_state[nzchar(jobs$job_id)] <- "Finished or not in queue"
+    }
+  }
+  keep <- intersect(c("time", "step", "job_id", "slurm_state", "output"), names(jobs))
+  jobs[, keep, drop = FALSE]
+}
+
+active_job_steps <- function(project) {
+  jobs <- job_history(project)
+  if (!NROW(jobs) || !"slurm_state" %in% names(jobs)) return(character(0))
+  active_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
+  unique(jobs$step[jobs$slurm_state %in% active_states])
 }
 
 normalize_pipeline_status <- function(status) {
@@ -784,7 +857,13 @@ body { background:#f5f7fb; color:#17202f; }
 .status-pill.not-started { color:#526070; background:#eef2f7; border:1px solid #cfd7e3; }
 .run-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; margin-top:14px; }
 .run-card p { min-height:38px; margin-bottom:12px; }
-.native-results-host { margin: -15px; }
+.progress-note { color:#657084; margin-bottom:10px; }
+.job-table-wrap { margin-top:16px; }
+.native-results-host { margin: -18px -24px -24px -24px; }
+.native-results-host .container-fluid { max-width: none !important; width: 100% !important; padding: 10px 12px 18px 12px !important; }
+.native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; }
+.native-results-host .hero { padding: 20px 24px 18px 24px !important; }
+.native-results-host .main-tabs { padding: 14px 16px 20px 16px !important; }
 "
 
 ui <- fluidPage(
@@ -795,9 +874,10 @@ ui <- fluidPage(
   ),
   sidebarLayout(
     sidebarPanel(
-      width = 3,
+      width = 2,
       selectInput("analysis", "Analysis", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq", "All analyses"), selected = "RNA-seq"),
       uiOutput("project_ui"),
+      uiOutput("new_project_ui"),
       tags$hr(),
       div(class = "muted", sprintf("CodeSpringLab root: %s", CSL_ROOT)),
       tags$hr(),
@@ -805,7 +885,7 @@ ui <- fluidPage(
       verbatimTextOutput("project_paths")
     ),
     mainPanel(
-      width = 9,
+      width = 10,
       tabsetPanel(
         id = "web_main_tabs",
         tabPanel("Setup", br(), h3("Project Setup"), tableOutput("setup_table"), uiOutput("source_config_ui")),
@@ -822,13 +902,15 @@ ui <- fluidPage(
                  h3("Pipeline Progress"),
                  div(class = "status-toolbar",
                      selectInput("progress_status_filter", "Show steps", choices = c("All", "Active", "Complete", "Not started"), selected = "All"),
-                     actionButton("refresh_progress", "Refresh", class = "btn-primary")
+                     actionButton("refresh_progress", "Refresh now", class = "btn-primary")
                  ),
+                 textOutput("progress_updated"),
                  uiOutput("status_cards_ui"),
                  table_output("status_table"),
                  br(),
                  h4("Sample Progress"),
-                 table_output("sample_progress_table")),
+                 table_output("sample_progress_table"),
+                 div(class = "job-table-wrap", h4("Submitted Jobs"), table_output("active_jobs_table"))),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Each action submits a SLURM sbatch job. Accepted jobs keep running after this app or browser is closed."),
                  fluidRow(
@@ -868,14 +950,30 @@ server <- function(input, output, session) {
 
   output$project_ui <- renderUI({
     p <- filtered_projects()
-    if (!length(p)) {
-      return(div(class = "muted", "No project configs were found. Check CSL_CODESPRINGLAB_ROOT or create a new project config."))
-    }
-    labels <- vapply(p, function(x) paste0(x$label, " (", x$analysis, if (nzchar(x$source_config)) " · CSL config" else "", ")"), character(1))
-    selectInput("project_id", "Project config", choices = labels, selected = labels[[1]])
+    labels <- if (length(p)) vapply(p, function(x) paste0(x$label, " (", x$analysis, if (nzchar(x$source_config)) " · CSL config" else "", ")"), character(1)) else character(0)
+    choices <- c(stats::setNames(labels, labels), "Start a new project" = "__new__")
+    selectInput("project_id", "Project config", choices = choices, selected = if (length(labels)) labels[[1]] else "__new__")
+  })
+
+  output$new_project_ui <- renderUI({
+    if (!identical(input$project_id, "__new__")) return(NULL)
+    tagList(
+      tags$hr(),
+      h4("New Project"),
+      textInput("new_project_name", "Project name", value = "new_rnaseq_project"),
+      selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = if (identical(input$analysis, "All analyses")) "RNA-seq" else input$analysis),
+      selectInput("new_genome", "Genome", choices = c("mouse", "human"), selected = "mouse"),
+      radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
+      textInput("new_fastq_dir", "Raw FASTQ folder", value = ""),
+      textInput("new_results_root", "Results root", value = "~/csl_results"),
+      textInput("new_design_matrix_path", "Design matrix path", value = ""),
+      actionButton("create_project_config", "Create project config", class = "btn-primary"),
+      textOutput("create_project_status")
+    )
   })
 
   current_project <- reactive({
+    if (identical(input$project_id, "__new__")) return(new_project_from_inputs(input))
     p <- filtered_projects()
     req(length(p) > 0)
     labels <- vapply(p, function(x) paste0(x$label, " (", x$analysis, if (nzchar(x$source_config)) " · CSL config" else "", ")"), character(1))
@@ -914,6 +1012,17 @@ server <- function(input, output, session) {
     p <- current_project()
     if (!nzchar(p$source_config)) return(NULL)
     tagList(h4("Imported CodeSpringLab Config"), tags$pre(p$source_config))
+  })
+
+  output$create_project_status <- renderText("")
+  observeEvent(input$create_project_config, {
+    p <- new_project_from_inputs(input)
+    msg <- tryCatch({
+      cfg <- write_project_config(p)
+      projects(discover_projects())
+      paste("Created project config:", cfg)
+    }, error = function(e) paste("ERROR:", conditionMessage(e)))
+    output$create_project_status <- renderText(msg)
   })
 
   observeEvent(input$scan_fastqs, {
@@ -961,6 +1070,15 @@ server <- function(input, output, session) {
     output$design_save_status <- renderText(msg)
   })
 
+  observe({
+    invalidateLater(10000, session)
+    progress_refresh(Sys.time())
+  })
+
+  output$progress_updated <- renderText({
+    paste("Auto-refreshes every 10 seconds. Last checked:", format(progress_refresh(), "%Y-%m-%d %H:%M:%S"))
+  })
+
   progress_status <- reactive({
     progress_refresh()
     df <- project_status(current_project())
@@ -984,7 +1102,13 @@ server <- function(input, output, session) {
     sample_progress(current_project())
   }, page_length = 25)
 
+  output$active_jobs_table <- render_csl_table({
+    progress_refresh()
+    job_history(current_project())
+  }, page_length = 10)
+
   output$run_step_cards <- renderUI({
+    progress_refresh()
     status <- project_status(current_project())
     meta <- run_step_meta()
     div(class = "run-grid", lapply(seq_len(NROW(meta)), function(i) {
@@ -999,18 +1123,23 @@ server <- function(input, output, session) {
 
   observeEvent(input$run_fastqc, {
     run_message(submit_fastqc_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
+    progress_refresh(Sys.time())
   })
   observeEvent(input$run_cutadapt, {
     run_message(submit_cutadapt_jobs(current_project(), input$adapter1, input$adapter2, input$min_length))
+    progress_refresh(Sys.time())
   })
   observeEvent(input$run_star, {
     run_message(submit_star_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
+    progress_refresh(Sys.time())
   })
   observeEvent(input$run_kallisto, {
     run_message(submit_kallisto_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
+    progress_refresh(Sys.time())
   })
   observeEvent(input$run_featurecounts, {
     run_message(submit_featurecounts_jobs(current_project(), input$feature_attr))
+    progress_refresh(Sys.time())
   })
   observeEvent(input$run_deseq2, {
     if (identical(input$deseq_reference, input$deseq_comparison)) {
@@ -1018,6 +1147,7 @@ server <- function(input, output, session) {
     } else {
       run_message(submit_deseq2_job(current_project(), input$deseq_reference, input$deseq_comparison, "NoRedundant"))
     }
+    progress_refresh(Sys.time())
   })
   output$run_output <- renderText(run_message())
 
