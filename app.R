@@ -1679,10 +1679,6 @@ select.form-control {
   border-radius: 8px !important;
 }
 .selectize-dropdown {
-  position: absolute !important;
-  top: 100% !important;
-  left: 0 !important;
-  width: 100% !important;
   z-index: 100000 !important;
   background: #ffffff !important;
   color: #132033 !important;
@@ -1853,7 +1849,7 @@ server <- function(input, output, session) {
       h4("New Project"),
       textInput("new_project_name", "Project name", value = "new_rnaseq_project"),
       selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = input$analysis, selectize = FALSE),
-      selectInput("new_genome", "Genome", choices = c("mouse", "human"), selected = "mouse"),
+      selectInput("new_genome", "Genome", choices = c("mouse", "human"), selected = "mouse", selectize = FALSE),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
       textInput("new_fastq_dir", "Raw FASTQ folder", value = ""),
       textInput("new_results_root", "Results root", value = "~/csl_results"),
@@ -2050,9 +2046,9 @@ server <- function(input, output, session) {
         "run_fastqc", "Submit FastQC"),
       tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
         tagList(
-          selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = adapter_choices_r1(), selected = adapter_choices_r1()[[1]], width = "100%"),
+          selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = adapter_choices_r1(), selected = adapter_choices_r1()[[1]], width = "100%", selectize = FALSE),
           conditionalPanel("input.cutadapt_adapter1 == '__custom__'", textInput("cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = "", width = "100%")),
-          selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = adapter_choices_r2(), selected = adapter_choices_r2()[[1]], width = "100%"),
+          selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = adapter_choices_r2(), selected = adapter_choices_r2()[[1]], width = "100%", selectize = FALSE),
           conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = "", width = "100%")),
           textInput("cutadapt_min_length", "Minimum read length", value = "20")
         ),
@@ -2061,13 +2057,13 @@ server <- function(input, output, session) {
         tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = TRUE)),
         "run_star", "Submit STAR"),
       tool_panel("RSEM optional", status, "Optional transcript/gene quantification from STAR BAM and transcriptome BAM outputs.",
-        tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = "gene_id")),
+        tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
         "run_rsem", "Submit RSEM"),
       tool_panel("Kallisto optional", status, "Optional transcript abundance quantification from raw or trimmed reads.",
         tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = TRUE)),
         "run_kallisto", "Submit Kallisto"),
       tool_panel("featureCounts", status, "Quantify STAR BAM files with the selected GTF attribute.",
-        tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id")),
+        tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
         "run_featurecounts", "Submit featureCounts"),
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
         uiOutput("deseq_controls_ui"),
@@ -2085,9 +2081,9 @@ server <- function(input, output, session) {
     ref <- input$deseq_reference %||% if (length(vals)) vals[[1]] else ""
     comp <- input$deseq_comparison %||% if (length(vals) > 1) vals[[2]] else ref
     tagList(
-      selectInput("deseq_compare_col", "Comparison column", choices = cols, selected = selected_col),
-      selectInput("deseq_reference", "Reference/baseline", choices = vals, selected = ref),
-      selectInput("deseq_comparison", "Comparison", choices = vals, selected = comp)
+      selectInput("deseq_compare_col", "Comparison column", choices = cols, selected = selected_col, selectize = FALSE),
+      selectInput("deseq_reference", "Reference/baseline", choices = vals, selected = ref, selectize = FALSE),
+      selectInput("deseq_comparison", "Comparison", choices = vals, selected = comp, selectize = FALSE)
     )
   })
 
@@ -2154,7 +2150,7 @@ server <- function(input, output, session) {
     p <- current_project()
     files <- c(list.files(file.path(p$data_dir, "fastqc"), pattern = "\\.html$", full.names = TRUE),
                list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "\\.html$", full.names = TRUE))
-    selectInput("fastqc_file", "FastQC report", choices = files, selected = files[1] %||% character(0))
+    selectInput("fastqc_file", "FastQC report", choices = files, selected = files[1] %||% character(0), selectize = FALSE)
   })
   output$fastqc_view <- renderUI({ req(input$fastqc_file); image_or_file_ui(input$fastqc_file, "1050px") })
   output$star_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "star_summary", "summary_matrix.txt")), page_length = 50)
@@ -2163,7 +2159,7 @@ server <- function(input, output, session) {
 
   file_select <- function(id, label, dir, pattern) {
     files <- if (dir.exists(dir)) list.files(dir, pattern = pattern, recursive = TRUE, full.names = TRUE) else character(0)
-    selectInput(id, label, choices = files, selected = files[1] %||% character(0))
+    selectInput(id, label, choices = files, selected = files[1] %||% character(0), selectize = FALSE)
   }
   output$rsem_file_ui <- renderUI({ file_select("rsem_file", "RSEM table", file.path(current_project()$data_dir, "rsem"), "\\.(txt|csv|results)$") })
   output$rsem_table <- render_csl_table({ req(input$rsem_file); safe_read_table(input$rsem_file, 5000) }, page_length = 50)
@@ -2198,7 +2194,7 @@ server <- function(input, output, session) {
     choices <- log_file_choices(current_project())
     if (!length(choices)) return(div(class = "empty-box", paste("No stdout/stderr log files were found in", file.path(dirname(current_project()$data_dir), "log"))))
     tagList(
-      selectInput("selected_log_file", "Open job log", choices = choices),
+      selectInput("selected_log_file", "Open job log", choices = choices, selectize = FALSE),
       radioButtons("log_view_mode", "View", choices = c("Tail" = "tail", "Head" = "head", "Full" = "full"), selected = "tail", inline = TRUE)
     )
   })
