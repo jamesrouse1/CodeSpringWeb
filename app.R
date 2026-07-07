@@ -451,6 +451,18 @@ scan_fastqs <- function(folder, paired = TRUE, metadata_cols = "treatment") {
   df[, c("include", "sample", metadata_cols, "filename", "status"), drop = FALSE]
 }
 
+sync_metadata_columns <- function(df, metadata_cols) {
+  if (!NROW(df)) {
+    df <- data.frame(include = logical(), sample = character(), filename = character(), status = character())
+  }
+  metadata_cols <- unique(metadata_cols[nzchar(metadata_cols)])
+  current_metadata <- setdiff(names(df), c("include", "sample", "filename", "status"))
+  for (col in setdiff(metadata_cols, current_metadata)) df[[col]] <- ""
+  drop_cols <- setdiff(current_metadata, metadata_cols)
+  if (length(drop_cols)) df <- df[, setdiff(names(df), drop_cols), drop = FALSE]
+  df[, design_matrix_columns(df), drop = FALSE]
+}
+
 design_matrix_columns <- function(df) {
   if (!NROW(df)) return(c("include", "sample", "treatment", "filename", "status"))
   c("include", "sample", setdiff(names(df), c("include", "sample", "filename", "status")), "filename", "status")
@@ -737,7 +749,7 @@ project_status <- function(project) {
   data_dir <- project$data_dir
   design <- project$design_matrix_path
   raw <- data.frame(
-    step = c("Setup", "Design matrix", "FASTQ reads", "FastQC", "Cutadapt", "STAR", "Kallisto", "featureCounts", "Count matrix", "DESeq2", "GSEA"),
+    step = c("Setup", "Design matrix", "FASTQ reads", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA"),
     status = c(
       if (nzchar(project$name)) "Complete" else "Not started",
       if (file.exists(design)) "Complete" else "Not started",
@@ -745,6 +757,7 @@ project_status <- function(project) {
       if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "star"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "rsem"), "\\.genes\\.results$") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "kallisto"), "abundance\\.tsv$") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "featurecounts"), "_counts\\.txt$") > 0) "Complete" else "Not started",
       if (file.exists(file.path(data_dir, "counts", "count_matrix.txt"))) "Complete" else "Not started",
@@ -758,6 +771,7 @@ project_status <- function(project) {
       file.path(data_dir, "fastqc"),
       file.path(data_dir, "cutadapt"),
       file.path(data_dir, "star"),
+      file.path(data_dir, "rsem"),
       file.path(data_dir, "kallisto"),
       file.path(data_dir, "featurecounts"),
       file.path(data_dir, "counts", "count_matrix.txt"),
@@ -810,7 +824,8 @@ sample_progress <- function(project) {
       FastQC = if (count_files(file.path(data_dir, "fastqc"), paste0(sample, ".*\\.html$")) > 0 || count_files(file.path(data_dir, "fastqc_cutadapt"), paste0(sample, ".*\\.html$")) > 0) "ready" else "missing",
       Trim = if (count_files(file.path(data_dir, "cutadapt"), paste0(sample, ".*", fastq_suffix_regex)) > 0) "ready" else "missing",
       STAR = if (file.exists(file.path(data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam")))) "ready" else "missing",
-      Kallisto = if (file.exists(file.path(data_dir, "kallisto", sample, "abundance.tsv"))) "ready" else "missing",
+      RSEM_optional = if (file.exists(file.path(data_dir, "rsem", sample, paste0(sample, ".genes.results")))) "ready" else "optional",
+      Kallisto_optional = if (file.exists(file.path(data_dir, "kallisto", sample, "abundance.tsv"))) "ready" else "optional",
       featureCounts = if (file.exists(file.path(data_dir, "featurecounts", sample, paste0(sample, "_counts.txt")))) "ready" else "missing",
       stringsAsFactors = FALSE
     )
@@ -842,6 +857,7 @@ genome_resources <- function(project) {
       label = "human hg38 / GENCODE v42 annotation; kallisto transcript index v45",
       star_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/hg38_p13_gencode_rel42_all_starindex",
       kallisto_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v45.transcripts.idx",
+      rsem_index = "/grid/bsr/data/data/utama/genome/human_rsem_index_star_gencode_hg38_p13_rel42_v2.7.2b/human_gencode",
       gtf = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v42.chr_patch_hapl_scaff.annotation.gtf",
       strand_bed = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v42.chr_patch_hapl_scaff.annotation_forStrandDetect_geneID.bed"
     )
@@ -850,10 +866,29 @@ genome_resources <- function(project) {
       label = "mouse GRCm39 / GENCODE M29",
       star_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/GRCm39_M29_gencode_starindex",
       kallisto_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.transcripts.idx",
+      rsem_index = "/grid/bsr/data/data/utama/genome/mouse_rsem_index_star_gencode_GRCm39_M29_v2.7.10a/mouse_gencode",
       gtf = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation.gtf",
       strand_bed = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation_forStrandDetect_geneID.bed"
     )
   }
+}
+
+adapter_choices_r1 <- function() {
+  c(
+    "Illumina Universal TruSeq RNA - AGATCGGAAGAGCACACGTCTGAACTCCAGTCA" = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA",
+    "Nextera Transposase ATAC - CTGTCTCTTATACACATCTCCGAGCCCACGAGAC" = "CTGTCTCTTATACACATCTCCGAGCCCACGAGAC",
+    "Illumina Small RNA 3 prime - TGGAATTCTCGG" = "TGGAATTCTCGG",
+    "Illumina Small RNA 5 prime - GATCGTCGGACT" = "GATCGTCGGACT"
+  )
+}
+
+adapter_choices_r2 <- function() {
+  c(
+    "Illumina Universal TruSeq RNA - AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT" = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+    "Nextera Transposase ATAC - CTGTCTCTTATACACATCTGACGCTGCCGACGA" = "CTGTCTCTTATACACATCTGACGCTGCCGACGA",
+    "Illumina Small RNA 3 prime - TGGAATTCTCGG" = "TGGAATTCTCGG",
+    "Illumina Small RNA 5 prime - GATCGTCGGACT" = "GATCGTCGGACT"
+  )
 }
 
 gencode_label <- function(project) {
@@ -979,8 +1014,25 @@ submit_kallisto_jobs <- function(project, trimmed = FALSE) {
     sample_dir <- file.path(outdir, row[["sample"]])
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     input_mode <- if (trimmed) "trimmed reads" else "raw reads"
-    submit_sbatch(project, "Kallisto", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto", input_mode)
+    submit_sbatch(project, "Kallisto optional", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto", input_mode)
   }), collapse = "\n")
+}
+
+submit_rsem_jobs <- function(project, feature = "gene_id") {
+  res <- genome_resources(project)
+  design <- safe_read_table(project$design_matrix_path)
+  if (!NROW(design) || !"sample" %in% names(design)) return("No samples found in design matrix.")
+  outdir <- file.path(project$data_dir, "rsem")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  script <- file.path(SCRIPTS_DIR, "RSEM", if (project$paired_end) "qsub_RSEM_PE.sh" else "qsub_RSEM_SE.sh")
+  paste(vapply(as.character(design$sample), function(sample) {
+    sample_dir <- file.path(outdir, sample)
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    bam <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam"))
+    bam_transcript <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.toTranscriptome.out.bam"))
+    count_prefix <- file.path(sample_dir, sample)
+    submit_sbatch(project, "RSEM optional", script, c(bam, res$rsem_index, feature, count_prefix, res$strand_bed, bam_transcript, project$name), "rsem", paste("STAR BAM; feature", feature))
+  }, character(1)), collapse = "\n")
 }
 
 submit_featurecounts_jobs <- function(project, feature = "gene_id") {
@@ -1053,18 +1105,19 @@ load_native_rnaseq_viewer <- function(project) {
 
 run_step_meta <- function() {
   data.frame(
-    order = seq_len(6),
-    step = c("FastQC", "Cutadapt", "STAR", "Kallisto", "featureCounts", "DESeq2"),
+    order = seq_len(7),
+    step = c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "DESeq2"),
     description = c(
       "Generate per-read quality reports.",
       "Trim adapters and short reads.",
       "Align reads and write BAM files.",
-      "Quantify transcript abundance.",
+      "Optional RSEM transcript/gene quantification.",
+      "Optional Kallisto transcript quantification.",
       "Create gene-level count files.",
       "Run differential expression and normalized counts."
     ),
-    button = c("run_fastqc", "run_cutadapt", "run_star", "run_kallisto", "run_featurecounts", "run_deseq2"),
-    label = c("Run FastQC", "Run cutadapt", "Run STAR", "Run Kallisto", "Run featureCounts", "Run DESeq2"),
+    button = c("run_fastqc", "run_cutadapt", "run_star", "run_rsem", "run_kallisto", "run_featurecounts", "run_deseq2"),
+    label = c("Run FastQC", "Run cutadapt", "Run STAR", "Run RSEM", "Run Kallisto", "Run featureCounts", "Run DESeq2"),
     stringsAsFactors = FALSE
   )
 }
@@ -1238,7 +1291,7 @@ ui <- fluidPage(
                    column(5, br(),
                           div(class = "button-row",
                               actionButton("scan_fastqs", "Scan FASTQ folder", class = "btn-primary"),
-                              actionButton("add_metadata_col", "Add metadata column", class = "btn-default")
+                              actionButton("add_metadata_col", "Update metadata columns", class = "btn-default")
                           ))
                  ),
                  uiOutput("design_editor_ui"),
@@ -1392,20 +1445,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$add_metadata_col, {
     df <- collect_design_inputs(input, design_state())
-    if (!NROW(df)) {
-      df <- data.frame(include = logical(), sample = character(), filename = character(), status = character())
-    }
-    added <- character(0)
-    for (col in metadata_cols_from_input()) {
-      if (!col %in% names(df)) {
-        df[[col]] <- ""
-        added <- c(added, col)
-      }
-    }
-    if (length(added)) {
-      df <- df[, design_matrix_columns(df), drop = FALSE]
-      design_state(df)
-    }
+    design_state(sync_metadata_columns(df, metadata_cols_from_input()))
   })
 
   observeEvent(current_project(), {
@@ -1515,15 +1555,18 @@ server <- function(input, output, session) {
         "run_fastqc", "Submit FastQC"),
       tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
         tagList(
-          textInput("cutadapt_adapter1", "R1 adapter", value = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"),
-          textInput("cutadapt_adapter2", "R2 adapter", value = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"),
+          selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = adapter_choices_r1(), selected = adapter_choices_r1()[[1]]),
+          selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = adapter_choices_r2(), selected = adapter_choices_r2()[[1]]),
           textInput("cutadapt_min_length", "Minimum read length", value = "20")
         ),
         "run_cutadapt", "Submit cutadapt"),
       tool_panel("STAR", status, "Align raw or trimmed reads to the selected genome index.",
         tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = TRUE)),
         "run_star", "Submit STAR"),
-      tool_panel("Kallisto", status, "Quantify transcript abundance from raw or trimmed reads.",
+      tool_panel("RSEM optional", status, "Optional transcript/gene quantification from STAR BAM and transcriptome BAM outputs.",
+        tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = "gene_id")),
+        "run_rsem", "Submit RSEM"),
+      tool_panel("Kallisto optional", status, "Optional transcript abundance quantification from raw or trimmed reads.",
         tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = TRUE)),
         "run_kallisto", "Submit Kallisto"),
       tool_panel("featureCounts", status, "Quantify STAR BAM files with the selected GTF attribute.",
@@ -1561,6 +1604,10 @@ server <- function(input, output, session) {
   })
   observeEvent(input$run_star, {
     run_message(submit_star_jobs(current_project(), isTRUE(input$star_use_trimmed)))
+    progress_refresh(Sys.time())
+  })
+  observeEvent(input$run_rsem, {
+    run_message(submit_rsem_jobs(current_project(), input$rsem_feature_attr))
     progress_refresh(Sys.time())
   })
   observeEvent(input$run_kallisto, {
