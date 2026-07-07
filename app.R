@@ -1416,15 +1416,18 @@ body { background:#eef3f8; color:#17202f; }
 .path-item code { display:block; white-space:normal; overflow-wrap:anywhere; background:#f8fafc; color:#17202f; border:1px solid #edf1f6; border-radius:6px; padding:7px; font-size:11px; }
 .config-card { margin-top:14px; background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 8px 20px rgba(15,23,36,.05); }
 .config-card code { display:block; white-space:normal; overflow-wrap:anywhere; margin-top:6px; background:#f8fafc; border:1px solid #edf1f6; border-radius:6px; padding:9px; color:#17202f; }
-.native-results-host { margin: 0 !important; width:100% !important; }
-.native-results-host > .container-fluid { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 6px 0 18px 0 !important; }
-.native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; margin:0 !important; }
+.native-results-host { margin: 0 !important; width:100% !important; max-width:100% !important; overflow:auto !important; }
+.native-results-host > .container-fluid { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 6px 0 18px 0 !important; overflow-x:auto !important; }
+.native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; margin:0 !important; overflow:visible !important; }
 .native-results-host .hero { padding: 18px 22px 16px 22px !important; }
-.native-results-host .main-tabs { padding: 14px 14px 20px 14px !important; }
-.dataTables_wrapper { width:100%; }
-.dataTables_scrollBody { max-height:560px !important; }
-.native-results-host .dataTables_scrollBody { max-height:650px !important; overflow:auto !important; }
+.native-results-host .main-tabs { padding: 14px 14px 20px 14px !important; overflow-x:auto !important; }
+.native-results-host .tab-content, .native-results-host .tab-pane, .native-results-host .main-panel { max-width:100% !important; overflow-x:auto !important; }
+.dataTables_wrapper { width:100%; max-width:100%; overflow-x:auto; }
+.dataTables_scroll { width:100%; max-width:100%; overflow-x:auto; }
+.dataTables_scrollBody { max-height:min(62vh, 560px) !important; overflow:auto !important; }
+.native-results-host .dataTables_scrollBody { max-height:min(68vh, 650px) !important; overflow:auto !important; }
 .native-results-host .table, .native-results-host table { max-width:100%; }
+.native-results-host .shiny-html-output { max-width:100%; overflow-x:auto !important; }
 "
 
 ui <- fluidPage(
