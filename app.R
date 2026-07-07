@@ -1734,6 +1734,18 @@ select.form-control {
 .project-card-top {
   border-bottom: 1px solid #edf1f6;
   padding-bottom: 12px;
+  display: block;
+}
+.project-title-wrap {
+  width: 100%;
+  min-width: 0;
+}
+.project-title-wrap h3 {
+  width: 100%;
+}
+.project-card-top .analysis-badge {
+  display: inline-block;
+  margin-top: 8px;
 }
 .compact-path-list .path-item {
   border-top: 0;
