@@ -22,7 +22,7 @@ install_r_package_if_missing() {
   fi
 
   printf '\033[33mInstalling required R package %s into your user library...\033[0m\n' "$pkg"
-  Rscript -e "pkg <- '$pkg'; lib <- Sys.getenv('R_LIBS_USER'); if (!nzchar(lib)) lib <- file.path(path.expand('~'), 'R', paste0(R.version$platform, '-library'), paste(R.version$major, sub('\\\\..*', '', R.version$minor), sep='.')); lib <- path.expand(lib); dir.create(lib, recursive = TRUE, showWarnings = FALSE); .libPaths(c(lib, .libPaths())); install.packages(pkg, lib = lib, repos = 'https://cloud.r-project.org'); if (!requireNamespace(pkg, quietly = TRUE)) stop('Could not install required R package: ', pkg)"
+  Rscript -e 'pkg <- commandArgs(TRUE)[1]; lib <- Sys.getenv("R_LIBS_USER"); if (!nzchar(lib)) lib <- file.path(path.expand("~"), "R", paste0(R.version$platform, "-library"), paste(R.version$major, sub("\\..*", "", R.version$minor), sep = ".")); lib <- path.expand(lib); dir.create(lib, recursive = TRUE, showWarnings = FALSE); .libPaths(c(lib, .libPaths())); install.packages(pkg, lib = lib, repos = "https://cloud.r-project.org"); if (!requireNamespace(pkg, quietly = TRUE)) stop("Could not install required R package: ", pkg)' "$pkg"
 }
 
 install_r_package_if_missing "DT"
