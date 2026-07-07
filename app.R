@@ -57,6 +57,12 @@ SCRIPTS_DIR <- file.path(CSL_ROOT, "scripts_DoNotTouch")
 APP_HOME <- path.expand(Sys.getenv("CSL_WEB_HOME", unset = "~/.codespringweb"))
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
+LOGO_CSL_PATH <- file.path(SCRIPTS_DIR, "Logo_CSL.png")
+LOGO_PATH <- file.path(SCRIPTS_DIR, "Logo.png")
+FLOWCHART_PATH <- file.path(SCRIPTS_DIR, "flowchart.png")
+if (file.exists(LOGO_CSL_PATH)) addResourcePath("csl_logo", dirname(LOGO_CSL_PATH))
+if (file.exists(LOGO_PATH)) addResourcePath("codespring_logo", dirname(LOGO_PATH))
+if (file.exists(FLOWCHART_PATH)) addResourcePath("codespring_flowchart", dirname(FLOWCHART_PATH))
 
 cleanup_previous_shiny_processes <- function() {
   if (identical(Sys.getenv("CSL_WEB_AUTOKILL_SHINY", unset = "1"), "0")) return(invisible(character(0)))
@@ -558,8 +564,43 @@ job_history <- function(project) {
       jobs$slurm_state[nzchar(jobs$job_id)] <- "Finished or not in queue"
     }
   }
-  keep <- intersect(c("time", "step", "job_id", "slurm_state", "output"), names(jobs))
+  extract_output_field <- function(x, key) {
+    pat <- paste0(".*", key, ":[[:space:]]*([^\\n]+).*")
+    val <- sub(pat, "\\1", x)
+    ifelse(identical(val, x), "", val)
+  }
+  jobs$input_mode <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "input_mode")
+  jobs$stdout <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "stdout")
+  jobs$stderr <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "stderr")
+  keep <- intersect(c("time", "step", "job_id", "slurm_state", "input_mode", "stdout", "stderr"), names(jobs))
   jobs[, keep, drop = FALSE]
+}
+
+last_job_modes <- function(project) {
+  jobs <- job_history(project)
+  if (!NROW(jobs) || !"input_mode" %in% names(jobs)) return(setNames(character(0), character(0)))
+  jobs <- jobs[nzchar(jobs$input_mode), , drop = FALSE]
+  if (!NROW(jobs)) return(setNames(character(0), character(0)))
+  out <- tapply(jobs$input_mode, jobs$step, function(x) tail(x, 1))
+  unlist(out)
+}
+
+log_file_choices <- function(project) {
+  jobs <- job_history(project)
+  if (!NROW(jobs)) return(character(0))
+  vals <- c()
+  for (i in seq_len(NROW(jobs))) {
+    label_base <- paste(jobs$time[i] %||% "", jobs$step[i] %||% "", jobs$job_id[i] %||% "")
+    if ("stdout" %in% names(jobs) && nzchar(jobs$stdout[i] %||% "")) vals[paste(label_base, "stdout")] <- jobs$stdout[i]
+    if ("stderr" %in% names(jobs) && nzchar(jobs$stderr[i] %||% "")) vals[paste(label_base, "stderr")] <- jobs$stderr[i]
+  }
+  vals[file.exists(vals)]
+}
+
+read_log_tail <- function(path, n = 300) {
+  if (!nzchar(path %||% "") || !file.exists(path)) return("")
+  lines <- readLines(path, warn = FALSE)
+  paste(utils::tail(lines, n), collapse = "\n")
 }
 
 active_job_steps <- function(project) {
@@ -607,6 +648,9 @@ project_status <- function(project) {
     ),
     stringsAsFactors = FALSE
   )
+  modes <- last_job_modes(project)
+  raw$input <- unname(modes[raw$step])
+  raw$input[is.na(raw$input)] <- ""
   active <- active_job_steps(project)
   raw$status[raw$step %in% active & raw$status != "Complete"] <- "Active"
   raw$status <- normalize_pipeline_status(raw$status)
@@ -631,7 +675,8 @@ status_cards <- function(df) {
             tags$strong(df$step[i]),
             status_pill(df$status[i])
         ),
-        div(class = "status-path", df$path[i])
+        div(class = "status-path", df$path[i]),
+        if ("input" %in% names(df) && nzchar(df$input[i])) div(class = "status-path", paste("Last input:", df$input[i])) else NULL
     )
   }))
 }
@@ -676,6 +721,7 @@ genome_resources <- function(project) {
   genome <- tolower(project$genome %||% "mouse")
   if (genome == "human") {
     list(
+      label = "human hg38 / GENCODE v42 annotation; kallisto transcript index v45",
       star_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/hg38_p13_gencode_rel42_all_starindex",
       kallisto_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v45.transcripts.idx",
       gtf = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/gencode.v42.chr_patch_hapl_scaff.annotation.gtf",
@@ -683,12 +729,17 @@ genome_resources <- function(project) {
     )
   } else {
     list(
+      label = "mouse GRCm39 / GENCODE M29",
       star_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/GRCm39_M29_gencode_starindex",
       kallisto_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.transcripts.idx",
       gtf = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation.gtf",
       strand_bed = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/gencode.vM29.annotation_forStrandDetect_geneID.bed"
     )
   }
+}
+
+gencode_label <- function(project) {
+  genome_resources(project)$label
 }
 
 resolve_read_path <- function(base, value) {
@@ -720,7 +771,7 @@ parse_sbatch_job_id <- function(output) {
   sub(".*Submitted batch job[[:space:]]+", "", regmatches(output, m))
 }
 
-submit_sbatch <- function(project, step, script, args, log_name) {
+submit_sbatch <- function(project, step, script, args, log_name, input_mode = "") {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
   stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
@@ -740,8 +791,8 @@ submit_sbatch <- function(project, step, script, args, log_name) {
   out <- tryCatch(system2(cmd[1], cmd[-1], stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
   out_text <- paste(out, collapse = "\n")
   job_id <- parse_sbatch_job_id(out_text)
-  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), paste("stdout:", stdout), paste("stderr:", stderr)), collapse = "\n"))
-  paste(c(paste("Command:", paste(cmd, collapse = " ")), out_text, if (nzchar(job_id)) paste("Job ID:", job_id), paste("stdout:", stdout), paste("stderr:", stderr)), collapse = "\n")
+  save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr)), collapse = "\n"))
+  paste(c(paste("Command:", paste(cmd, collapse = " ")), out_text, if (nzchar(job_id)) paste("Job ID:", job_id), if (nzchar(input_mode)) paste("Input mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr)), collapse = "\n")
 }
 
 missing_read_message <- function(project, pairs) {
@@ -762,7 +813,8 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   if (nzchar(msg)) return(msg)
   reads <- unique(c(pairs$r1, if (project$paired_end) pairs$r2 else character(0)))
   script <- file.path(SCRIPTS_DIR, "FastQC", "qsub_fastqc.sh")
-  paste(vapply(reads, function(read) submit_sbatch(project, "FastQC", script, c(read, outdir, project$name), "fastQC"), character(1)), collapse = "\n")
+  input_mode <- if (trimmed) "trimmed reads" else "raw reads"
+  paste(vapply(reads, function(read) submit_sbatch(project, "FastQC", script, c(read, outdir, project$name), "fastQC", input_mode), character(1)), collapse = "\n")
 }
 
 submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
@@ -776,7 +828,7 @@ submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
     trimmed1 <- file.path(outdir, basename(row[["r1"]]))
     trimmed2 <- if (project$paired_end) file.path(outdir, basename(row[["r2"]])) else trimmed1
     read2 <- if (project$paired_end) row[["r2"]] else row[["r1"]]
-    submit_sbatch(project, "Cutadapt", script, c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], read2, project$name), "cutadapt")
+    submit_sbatch(project, "Cutadapt", script, c(min_length, adapter1, adapter2, trimmed1, trimmed2, row[["r1"]], read2, project$name), "cutadapt", "raw reads")
   }), collapse = "\n")
 }
 
@@ -792,7 +844,8 @@ submit_star_jobs <- function(project, trimmed = FALSE) {
     sample_dir <- file.path(outdir, row[["sample"]])
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     out_prefix <- file.path(sample_dir, row[["sample"]])
-    submit_sbatch(project, "STAR", script, c(out_prefix, res$star_index, row[["r1"]], row[["r2"]], project$name), "star")
+    input_mode <- if (trimmed) "trimmed reads" else "raw reads"
+    submit_sbatch(project, "STAR", script, c(out_prefix, res$star_index, row[["r1"]], row[["r2"]], project$name), "star", input_mode)
   }), collapse = "\n")
 }
 
@@ -807,7 +860,8 @@ submit_kallisto_jobs <- function(project, trimmed = FALSE) {
   paste(apply(pairs, 1, function(row) {
     sample_dir <- file.path(outdir, row[["sample"]])
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
-    submit_sbatch(project, "Kallisto", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto")
+    input_mode <- if (trimmed) "trimmed reads" else "raw reads"
+    submit_sbatch(project, "Kallisto", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto", input_mode)
   }), collapse = "\n")
 }
 
@@ -823,7 +877,7 @@ submit_featurecounts_jobs <- function(project, feature = "gene_id") {
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     bam <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam"))
     count_prefix <- file.path(sample_dir, sample)
-    submit_sbatch(project, "featureCounts", script, c(bam, res$gtf, feature, count_prefix, res$strand_bed, project$name), "featurecounts")
+    submit_sbatch(project, "featureCounts", script, c(bam, res$gtf, feature, count_prefix, res$strand_bed, project$name), "featurecounts", paste("STAR BAM; feature", feature))
   }, character(1)), collapse = "\n")
 }
 
@@ -833,7 +887,7 @@ submit_deseq2_job <- function(project, reference, comparison, redundant = "NoRed
   script <- file.path(SCRIPTS_DIR, "DESeq2", "qsub_deseq2.sh")
   rscript <- file.path(SCRIPTS_DIR, "DESeq2", "DESeq2.R")
   count_matrix <- file.path(project$data_dir, "counts", "count_matrix.txt")
-  submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, project$design_matrix_path, outdir, reference, comparison, redundant, project$name), "deseq2")
+  submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, project$design_matrix_path, outdir, reference, comparison, redundant, project$name), "deseq2", paste(reference, "vs", comparison))
 }
 
 write_native_shiny_config <- function(project) {
@@ -901,12 +955,33 @@ pipeline_stepper_ui <- function(project) {
   meta <- run_step_meta()
   div(class = "pipeline-stepper", lapply(seq_len(NROW(meta)), function(i) {
     st <- status$status[match(meta$step[i], status$step)] %||% "Not started"
+    mode <- status$input[match(meta$step[i], status$step)] %||% ""
     cls <- switch(st, "Complete" = "complete", "Active" = "active", "not-started")
     div(class = paste("pipeline-step", cls),
         div(class = "step-index", meta$order[i]),
-        div(class = "step-main", tags$strong(meta$step[i]), tags$span(st))
+        div(class = "step-main", tags$strong(meta$step[i]), tags$span(st), if (nzchar(mode)) tags$em(mode) else NULL)
     )
   }))
+}
+
+tool_panel <- function(step, status, description, controls, button_id, button_label) {
+  st <- status$status[match(step, status$step)] %||% "Not started"
+  mode <- status$input[match(step, status$step)] %||% ""
+  cls <- switch(st, "Complete" = "complete", "Active" = "active", "not-started")
+  tags$details(
+    class = paste("tool-panel", cls),
+    open = identical(st, "Active") || identical(st, "Not started"),
+    tags$summary(
+      div(class = "tool-summary",
+          div(tags$strong(step), tags$span(description)),
+          div(class = "tool-right", status_pill(st), if (nzchar(mode)) tags$small(mode) else NULL)
+      )
+    ),
+    div(class = "tool-body",
+        controls,
+        actionButton(button_id, button_label, class = "btn-primary")
+    )
+  )
 }
 
 list_result_files <- function(project, pattern = "\\.(txt|csv|tsv|html|png|pdf)$") {
@@ -931,26 +1006,46 @@ image_or_file_ui <- function(path, height = "900px") {
 }
 
 app_css <- "
-body { background:#f5f7fb; color:#17202f; }
+body { background:#eef3f8; color:#17202f; }
+.container-fluid { width:100%; max-width:none; padding:18px 22px 28px 22px; }
 .navbar, .navbar-default { background:#0f1724 !important; border:0; }
 .navbar-default .navbar-nav > li > a, .navbar-default .navbar-brand { color:#f8fafc !important; }
 .well, .panel, .tab-content { border-radius:8px; border-color:#d8dde8; }
-.csl-header { background:white; border:1px solid #d8dde8; border-radius:8px; padding:16px 18px; margin-bottom:14px; }
-.csl-header h2 { margin:0 0 6px 0; font-weight:700; }
+.csl-header { background:linear-gradient(135deg,#0f2742 0%,#145f78 58%,#1f8f7a 100%); color:white; border:0; border-radius:8px; padding:18px 22px; margin-bottom:14px; display:flex; align-items:center; justify-content:space-between; gap:20px; }
+.brand-lockup { display:flex; align-items:center; gap:16px; }
+.brand-lockup img { background:white; border-radius:8px; padding:7px; max-height:54px; max-width:150px; object-fit:contain; }
+.csl-header h2 { margin:0 0 5px 0; font-weight:700; color:white; }
+.csl-header .muted { color:#dceaf4; }
 .muted { color:#657084; }
 .empty-box { background:white; border:1px solid #d8dde8; border-radius:8px; padding:18px; color:#657084; }
 .btn-primary { background:#1f5eff; border-color:#1f5eff; }
 .status-toolbar { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; }
 .status-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(250px, 1fr)); gap:12px; margin-bottom:18px; }
-.status-card, .run-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 1px 2px rgba(15,23,36,0.04); }
+.status-card, .run-card, .tool-panel { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 1px 2px rgba(15,23,36,0.04); }
 .status-card-top, .run-card-top { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; }
 .status-path { color:#657084; font-size:12px; overflow-wrap:anywhere; }
 .status-pill { display:inline-flex; align-items:center; border-radius:999px; padding:4px 9px; font-size:12px; font-weight:700; white-space:nowrap; }
 .status-pill.active { color:#7c3d00; background:#fff4d6; border:1px solid #f0c36d; }
 .status-pill.complete { color:#0b6b3a; background:#def7e8; border:1px solid #8fd8ad; }
 .status-pill.not-started { color:#526070; background:#eef2f7; border:1px solid #cfd7e3; }
-.run-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; margin-top:14px; }
+.run-grid { display:grid; grid-template-columns:1fr; gap:12px; margin-top:14px; }
 .run-card p { min-height:38px; margin-bottom:12px; }
+.tool-panel { padding:0; overflow:hidden; }
+.tool-panel summary { cursor:pointer; list-style:none; padding:14px 16px; }
+.tool-panel summary::-webkit-details-marker { display:none; }
+.tool-panel.complete { border-left:5px solid #27ae60; }
+.tool-panel.active { border-left:5px solid #d99a15; }
+.tool-panel.not-started { border-left:5px solid #d55745; }
+.tool-summary { display:flex; justify-content:space-between; align-items:center; gap:16px; }
+.tool-summary strong { display:block; font-size:16px; }
+.tool-summary span { color:#657084; font-size:13px; }
+.tool-right { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.tool-right small { color:#657084; }
+.tool-body { padding:0 16px 16px 16px; border-top:1px solid #edf1f6; }
+.tool-body .form-group { margin-bottom:10px; }
+.resource-strip { display:grid; grid-template-columns:1.2fr 1fr; gap:12px; align-items:stretch; margin:12px 0 14px 0; }
+.resource-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; }
+.resource-card img { max-width:100%; max-height:150px; object-fit:contain; }
 .progress-note { color:#657084; margin-bottom:10px; }
 .job-table-wrap { margin-top:16px; }
 .design-table-scroll { overflow-x:auto; background:white; border:1px solid #d8dde8; border-radius:8px; padding:10px; }
@@ -964,7 +1059,7 @@ body { background:#f5f7fb; color:#17202f; }
 .pipeline-step.active { background:#fff4d6; border-color:#f0c36d; }
 .step-index { width:28px; height:28px; border-radius:50%; background:white; display:flex; align-items:center; justify-content:center; font-weight:700; }
 .step-main { display:flex; flex-direction:column; line-height:1.2; }
-.step-main span { font-size:12px; color:#657084; margin-top:3px; }
+.step-main span, .step-main em { font-size:12px; color:#657084; margin-top:3px; font-style:normal; }
 .native-results-host { margin: 0 !important; width:100% !important; }
 .native-results-host > .container-fluid { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 6px 0 18px 0 !important; }
 .native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; margin:0 !important; }
@@ -975,8 +1070,11 @@ body { background:#f5f7fb; color:#17202f; }
 ui <- fluidPage(
   tags$head(tags$style(HTML(app_css))),
   div(class = "csl-header",
-      h2("CodeSpringWeb"),
-      div(class = "muted", "Shiny control center for CodeSpringLab projects: configure, run, track, and visualize results from one port.")
+      div(class = "brand-lockup",
+          if (file.exists(LOGO_PATH)) tags$img(src = file.path("codespring_logo", basename(LOGO_PATH))),
+          div(h2("CodeSpringWeb"), div(class = "muted", "Shiny control center for CodeSpringLab projects: configure, run, track, and visualize results from one port."))
+      ),
+      if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH)), style = "max-height:58px;background:white;border-radius:8px;padding:7px;")
   ),
   sidebarLayout(
     sidebarPanel(
@@ -1020,24 +1118,14 @@ ui <- fluidPage(
                  table_output("sample_progress_table"),
                  div(class = "job-table-wrap", h4("Submitted Jobs"), table_output("active_jobs_table"))),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
-                 tags$p(class = "muted", "Each action submits a SLURM sbatch job. Accepted jobs keep running after this app or browser is closed."),
-                 fluidRow(
-                   column(3, checkboxInput("use_trimmed_reads", "Use trimmed reads", value = FALSE)),
-                   column(3, selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id")),
-                   column(3, textInput("deseq_reference", "DESeq2 reference", value = "control")),
-                   column(3, textInput("deseq_comparison", "DESeq2 comparison", value = "treated"))
-                 ),
-                 fluidRow(
-                   column(4, textInput("adapter1", "R1 adapter", value = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA")),
-                   column(4, textInput("adapter2", "R2 adapter", value = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT")),
-                   column(4, textInput("min_length", "Minimum read length", value = "20"))
-                 ),
+                 tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed."),
+                 uiOutput("run_resource_strip"),
                  uiOutput("run_pipeline_stepper"),
                  uiOutput("run_step_cards"),
                  br(),
                  verbatimTextOutput("run_output")),
         tabPanel("Results Explorer", uiOutput("native_results_ui")),
-        tabPanel("Logs", br(), h3("Submitted Jobs"), table_output("jobs_table"))
+        tabPanel("Logs", br(), h3("Submitted Jobs"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(textOutput("selected_log_text")))
       )
     )
   )
@@ -1111,8 +1199,8 @@ server <- function(input, output, session) {
   output$setup_table <- renderTable({
     p <- current_project()
     data.frame(
-      field = c("Project", "Analysis", "Genome", "Paired-end", "Results root", "Data folder", "FASTQ folder", "Design matrix"),
-      value = c(p$label, p$analysis, p$genome, as.character(p$paired_end), p$results_root, p$data_dir, p$fastq_dir, p$design_matrix_path),
+      field = c("Project", "Analysis", "Genome", "GENCODE/index", "Paired-end", "Results root", "Data folder", "FASTQ folder", "Design matrix"),
+      value = c(p$label, p$analysis, p$genome, gencode_label(p), as.character(p$paired_end), p$results_root, p$data_dir, p$fastq_dir, p$design_matrix_path),
       stringsAsFactors = FALSE
     )
   })
@@ -1226,34 +1314,64 @@ server <- function(input, output, session) {
     pipeline_stepper_ui(current_project())
   })
 
+  output$run_resource_strip <- renderUI({
+    p <- current_project()
+    div(class = "resource-strip",
+        div(class = "resource-card",
+            tags$strong("Genome resources"),
+            tags$p(class = "muted", gencode_label(p)),
+            tags$p(class = "status-path", genome_resources(p)$gtf)
+        ),
+        div(class = "resource-card",
+            if (file.exists(FLOWCHART_PATH)) tags$img(src = file.path("codespring_flowchart", basename(FLOWCHART_PATH))) else tags$p("Pipeline flowchart")
+        )
+    )
+  })
+
   output$run_step_cards <- renderUI({
     progress_refresh()
     status <- project_status(current_project())
-    meta <- run_step_meta()
-    div(class = "run-grid", lapply(seq_len(NROW(meta)), function(i) {
-      st <- status$status[match(meta$step[i], status$step)] %||% "Not started"
-      div(class = "run-card",
-          div(class = "run-card-top", tags$strong(meta$step[i]), status_pill(st)),
-          tags$p(class = "muted", meta$description[i]),
-          actionButton(meta$button[i], meta$label[i], class = "btn-primary")
-      )
-    }))
+    div(class = "run-grid",
+      tool_panel("FastQC", status, "Quality reports for raw or trimmed reads.",
+        tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = FALSE)),
+        "run_fastqc", "Submit FastQC"),
+      tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
+        tagList(
+          textInput("cutadapt_adapter1", "R1 adapter", value = "AGATCGGAAGAGCACACGTCTGAACTCCAGTCA"),
+          textInput("cutadapt_adapter2", "R2 adapter", value = "AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"),
+          textInput("cutadapt_min_length", "Minimum read length", value = "20")
+        ),
+        "run_cutadapt", "Submit cutadapt"),
+      tool_panel("STAR", status, "Align raw or trimmed reads to the selected genome index.",
+        tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = TRUE)),
+        "run_star", "Submit STAR"),
+      tool_panel("Kallisto", status, "Quantify transcript abundance from raw or trimmed reads.",
+        tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = TRUE)),
+        "run_kallisto", "Submit Kallisto"),
+      tool_panel("featureCounts", status, "Quantify STAR BAM files with the selected GTF attribute.",
+        tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id")),
+        "run_featurecounts", "Submit featureCounts"),
+      tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
+        tagList(textInput("deseq_reference", "DESeq2 reference", value = "control"),
+                textInput("deseq_comparison", "DESeq2 comparison", value = "treated")),
+        "run_deseq2", "Submit DESeq2")
+    )
   })
 
   observeEvent(input$run_fastqc, {
-    run_message(submit_fastqc_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
+    run_message(submit_fastqc_jobs(current_project(), isTRUE(input$fastqc_use_trimmed)))
     progress_refresh(Sys.time())
   })
   observeEvent(input$run_cutadapt, {
-    run_message(submit_cutadapt_jobs(current_project(), input$adapter1, input$adapter2, input$min_length))
+    run_message(submit_cutadapt_jobs(current_project(), input$cutadapt_adapter1, input$cutadapt_adapter2, input$cutadapt_min_length))
     progress_refresh(Sys.time())
   })
   observeEvent(input$run_star, {
-    run_message(submit_star_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
+    run_message(submit_star_jobs(current_project(), isTRUE(input$star_use_trimmed)))
     progress_refresh(Sys.time())
   })
   observeEvent(input$run_kallisto, {
-    run_message(submit_kallisto_jobs(current_project(), isTRUE(input$use_trimmed_reads)))
+    run_message(submit_kallisto_jobs(current_project(), isTRUE(input$kallisto_use_trimmed)))
     progress_refresh(Sys.time())
   })
   observeEvent(input$run_featurecounts, {
@@ -1332,6 +1450,17 @@ server <- function(input, output, session) {
     if (!file.exists(JOBS_PATH)) return(data.frame())
     utils::read.delim(JOBS_PATH, check.names = FALSE)
   }, page_length = 25)
+
+  output$log_file_ui <- renderUI({
+    choices <- log_file_choices(current_project())
+    if (!length(choices)) return(div(class = "empty-box", "No stdout/stderr log files were found for this project yet."))
+    selectInput("selected_log_file", "Open job log", choices = choices)
+  })
+
+  output$selected_log_text <- renderText({
+    req(input$selected_log_file)
+    read_log_tail(input$selected_log_file)
+  })
 }
 
 shinyApp(ui, server, onStart = cleanup_previous_shiny_processes)
