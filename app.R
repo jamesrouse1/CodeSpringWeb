@@ -100,11 +100,16 @@ cleanup_previous_shiny_processes <- function() {
     unique(trimws(pids[nzchar(pids)]))
   }
 
-  stop_listener <- function(pid, reason, signal = tools::SIGTERM) {
+  stop_listener <- function(pid, reason, signal = tools::SIGTERM, require_shiny = TRUE) {
     cmd <- pid_command(pid)
     user <- pid_user(pid)
     same_user <- !nzchar(current_user) || !nzchar(user) || identical(user, current_user)
-    if (same_user && looks_like_r_shiny(cmd)) kill_pid(pid, reason, signal)
+    if (!same_user) return(invisible(FALSE))
+    if (!require_shiny || looks_like_r_shiny(cmd)) {
+      reason <- paste0(reason, if (nzchar(cmd)) paste0(", command: ", substr(cmd, 1, 120)) else "")
+      return(kill_pid(pid, reason, signal))
+    }
+    invisible(FALSE)
   }
 
   pidfiles <- list.files(APP_HOME, pattern = "^codespringweb_.*\\.pid$|^rnaseq_shiny_.*\\.pid$", full.names = TRUE)
@@ -125,14 +130,31 @@ cleanup_previous_shiny_processes <- function() {
     if (looks_like_r_shiny(cmd) && !identical(pid, current_pid)) kill_pid(pid, "R/Shiny process")
   }
 
-  ports <- c(3838:3850, 8501:8515)
-  for (port in ports) {
-    for (pid in listener_pids(port)) stop_listener(pid, paste0("port:", port))
+  shiny_ports <- 3838:3850
+  web_ports <- 8501:8515
+  for (port in shiny_ports) {
+    for (pid in listener_pids(port)) stop_listener(pid, paste0("Shiny port:", port), require_shiny = TRUE)
+  }
+  for (port in web_ports) {
+    for (pid in listener_pids(port)) stop_listener(pid, paste0("CodeSpringWeb port:", port), require_shiny = FALSE)
   }
 
   Sys.sleep(0.7)
-  for (port in ports) {
-    for (pid in listener_pids(port)) stop_listener(pid, paste0("port still busy:", port), tools::SIGKILL)
+  for (port in shiny_ports) {
+    for (pid in listener_pids(port)) stop_listener(pid, paste0("Shiny port still busy:", port), tools::SIGKILL, require_shiny = TRUE)
+  }
+  for (port in web_ports) {
+    for (pid in listener_pids(port)) stop_listener(pid, paste0("CodeSpringWeb port still busy:", port), tools::SIGKILL, require_shiny = FALSE)
+  }
+
+  Sys.sleep(0.3)
+  busy_web <- unlist(lapply(web_ports, function(port) {
+    pids <- listener_pids(port)
+    if (!length(pids)) return(character(0))
+    paste0(port, "=", paste(pids, collapse = ","))
+  }), use.names = FALSE)
+  if (length(busy_web)) {
+    cat("WARNING: these CodeSpringWeb ports are still busy after cleanup: ", paste(busy_web, collapse = "; "), "\n", sep = "")
   }
 
   pid_path <- file.path(APP_HOME, paste0("codespringweb_", current_pid, ".pid"))
