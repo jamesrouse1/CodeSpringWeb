@@ -75,5 +75,5 @@ cd ~/CodeSpringWeb
 ./run_codespringweb.sh
 ```
 
-The script starts Shiny in the background, writes logs to `~/.codespringweb/`, and prints the one SSH tunnel command to run on your laptop.
+The script installs the required `DT` R package into your user library if it is missing, starts Shiny in the background, writes logs to `~/.codespringweb/`, and prints the one SSH tunnel command to run on your laptop.
 
