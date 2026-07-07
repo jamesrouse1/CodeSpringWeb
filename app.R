@@ -588,6 +588,9 @@ job_history <- function(project) {
   jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE), error = function(e) data.frame())
   if (!NROW(jobs) || !"project" %in% names(jobs) || !"step" %in% names(jobs) || !"output" %in% names(jobs)) return(data.frame())
   jobs <- jobs[jobs$project == project$name, , drop = FALSE]
+  if ("analysis" %in% names(jobs) && nzchar(project$analysis %||% "")) {
+    jobs <- jobs[jobs$analysis == project$analysis, , drop = FALSE]
+  }
   if (!NROW(jobs)) return(data.frame())
   jobs$job_id <- vapply(as.character(jobs$output), extract_job_id, character(1))
   jobs$slurm_state <- ifelse(nzchar(jobs$job_id), "Submitted", "No job id")
@@ -618,6 +621,19 @@ job_history <- function(project) {
   jobs[, keep, drop = FALSE]
 }
 
+job_history_display <- function(project) {
+  jobs <- job_history(project)
+  if (!NROW(jobs)) return(jobs)
+  jobs$logs <- apply(jobs, 1, function(row) {
+    labels <- character(0)
+    if ("stdout" %in% names(jobs) && nzchar(row[["stdout"]] %||% "")) labels <- c(labels, "output")
+    if ("stderr" %in% names(jobs) && nzchar(row[["stderr"]] %||% "")) labels <- c(labels, "error")
+    if (length(labels)) paste(labels, collapse = " / ") else ""
+  })
+  drop <- intersect(c("stdout", "stderr"), names(jobs))
+  jobs[, setdiff(names(jobs), drop), drop = FALSE]
+}
+
 last_job_modes <- function(project) {
   jobs <- job_history(project)
   if (!NROW(jobs) || !"input_mode" %in% names(jobs)) return(setNames(character(0), character(0)))
@@ -627,36 +643,72 @@ last_job_modes <- function(project) {
   unlist(out)
 }
 
+pretty_tool_name <- function(tool) {
+  tool <- as.character(tool %||% "")
+  key <- tolower(gsub("[^A-Za-z0-9]+", "_", tool))
+  known <- c(
+    fastqc = "FastQC",
+    fastqc_cutadapt = "FastQC",
+    cutadapt = "Cutadapt",
+    star = "STAR",
+    kallisto = "Kallisto",
+    featurecounts = "featureCounts",
+    deseq2 = "DESeq2",
+    gseapy = "GSEApy",
+    rsem = "RSEM",
+    copyfastq = "Copy FASTQ",
+    rnaseq_shiny = "RNA-seq viewer"
+  )
+  if (key %in% names(known)) return(unname(known[[key]]))
+  clean <- gsub("_", " ", key)
+  paste(tools::toTitleCase(clean))
+}
+
+log_label_from_path <- function(path, fallback = "Log") {
+  base <- basename(path %||% "")
+  m <- regexec("^(output|error)_([^.]*)\\.txt$", base)
+  hit <- regmatches(base, m)[[1]]
+  if (length(hit) == 3) {
+    log_type <- if (identical(hit[2], "output")) "output" else "error"
+    return(paste(pretty_tool_name(hit[3]), log_type))
+  }
+  paste(fallback, base)
+}
+
 log_file_choices <- function(project) {
   vals <- character(0)
   add_log_choice <- function(label, path) {
     path <- as.character(path %||% "")
     path <- path[!is.na(path) & nzchar(path)]
     if (!length(path)) return(invisible(NULL))
-    for (one_path in path) vals[[paste(label, basename(one_path))]] <<- one_path
+    for (one_path in path) {
+      one_label <- label
+      if (!nzchar(one_label %||% "")) one_label <- log_label_from_path(one_path)
+      vals[[one_label]] <<- one_path
+    }
     invisible(NULL)
   }
 
   project_log_dir <- file.path(dirname(project$data_dir), "log")
   if (dir.exists(project_log_dir)) {
     files <- list.files(project_log_dir, pattern = "^(output|error)_.*\\.txt$", full.names = TRUE)
-    add_log_choice("Project log", files)
+    for (one_path in files) add_log_choice(log_label_from_path(one_path), one_path)
   }
 
   jobs <- job_history(project)
   if (NROW(jobs)) {
     for (i in seq_len(NROW(jobs))) {
-      label_base <- paste(jobs$time[i] %||% "", jobs$step[i] %||% "", jobs$job_id[i] %||% "")
-      if ("stdout" %in% names(jobs)) add_log_choice(paste(label_base, "stdout"), jobs$stdout[i])
-      if ("stderr" %in% names(jobs)) add_log_choice(paste(label_base, "stderr"), jobs$stderr[i])
+      step <- jobs$step[i] %||% "Job"
+      job_id <- jobs$job_id[i] %||% ""
+      suffix <- if (nzchar(job_id)) paste0(" job ", job_id) else trimws(jobs$time[i] %||% "")
+      if ("stdout" %in% names(jobs) && nzchar(jobs$stdout[i] %||% "")) add_log_choice(trimws(paste(step, "output", suffix)), jobs$stdout[i])
+      if ("stderr" %in% names(jobs) && nzchar(jobs$stderr[i] %||% "")) add_log_choice(trimws(paste(step, "error", suffix)), jobs$stderr[i])
     }
   }
 
-  vals <- as.character(vals)
-  vals <- vals[!is.na(vals) & nzchar(vals)]
-  vals <- vals[file.exists(vals)]
-  vals <- vals[!duplicated(vals)]
-  vals
+  keep <- !is.na(vals) & nzchar(vals) & file.exists(vals)
+  vals <- vals[keep]
+  vals[!duplicated(vals)]
 }
 
 read_log_excerpt <- function(path, mode = "tail", n = 120) {
@@ -1128,6 +1180,25 @@ body { background:#eef3f8; color:#17202f; }
 .step-main { display:flex; flex-direction:column; line-height:1.2; }
 .step-main span, .step-main em { font-size:12px; color:#657084; margin-top:3px; font-style:normal; }
 .log-viewer { max-height:620px; overflow:auto; background:#0d1623; color:#d9e8ff; border-radius:8px; border:1px solid #1f3857; padding:14px; }
+.button-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.root-pill { background:#f8fafc; border:1px solid #d8dde8; border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:5px; }
+.root-pill span { font-size:11px; font-weight:700; color:#657084; text-transform:uppercase; letter-spacing:.03em; }
+.root-pill code { white-space:normal; color:#17202f; background:transparent; padding:0; font-size:11px; }
+.project-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 8px 20px rgba(15,23,36,.06); }
+.project-card-top { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:12px; }
+.project-title-wrap h3 { margin:2px 0 0 0; font-size:19px; font-weight:800; color:#17202f; overflow-wrap:anywhere; }
+.eyebrow { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:#657084; font-weight:800; }
+.analysis-badge { border-radius:999px; padding:5px 9px; font-size:11px; font-weight:800; white-space:nowrap; background:#e8f2ff; color:#15549a; border:1px solid #b9d5f5; }
+.analysis-badge.atac { background:#fff4d6; color:#7a4f00; border-color:#f0c36d; }
+.analysis-badge.chip { background:#def7e8; color:#176a38; border-color:#8fd8ad; }
+.project-meta-row { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:12px; }
+.meta-chip { background:#eef3f8; border:1px solid #d8dde8; border-radius:999px; padding:5px 8px; font-size:12px; color:#273449; font-weight:700; }
+.path-list { display:flex; flex-direction:column; gap:8px; }
+.path-item { border-top:1px solid #edf1f6; padding-top:8px; }
+.path-item span { display:block; font-size:11px; color:#657084; text-transform:uppercase; font-weight:800; margin-bottom:3px; }
+.path-item code { display:block; white-space:normal; overflow-wrap:anywhere; background:#f8fafc; color:#17202f; border:1px solid #edf1f6; border-radius:6px; padding:7px; font-size:11px; }
+.config-card { margin-top:14px; background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 8px 20px rgba(15,23,36,.05); }
+.config-card code { display:block; white-space:normal; overflow-wrap:anywhere; margin-top:6px; background:#f8fafc; border:1px solid #edf1f6; border-radius:6px; padding:9px; color:#17202f; }
 .native-results-host { margin: 0 !important; width:100% !important; }
 .native-results-host > .container-fluid { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 6px 0 18px 0 !important; }
 .native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; margin:0 !important; }
@@ -1151,10 +1222,9 @@ ui <- fluidPage(
       uiOutput("project_ui"),
       uiOutput("new_project_ui"),
       tags$hr(),
-      div(class = "muted", sprintf("CodeSpringLab root: %s", CSL_ROOT)),
+      div(class = "root-pill", tags$span("CodeSpringLab root"), tags$code(CSL_ROOT)),
       tags$hr(),
-      h4("Selected Project"),
-      verbatimTextOutput("project_paths")
+      uiOutput("project_card")
     ),
     mainPanel(
       width = 10,
@@ -1164,8 +1234,12 @@ ui <- fluidPage(
         tabPanel("Design Matrix", br(), h3("Design Matrix Builder"),
                  tags$p(class = "muted", "Scan the raw FASTQ folder, then edit include/sample/metadata cells directly. Filenames stay on the right so the run steps know which reads belong to each sample."),
                  fluidRow(
-                   column(8, textInput("metadata_cols", "Metadata columns", value = "treatment", placeholder = "treatment, batch, replicate")),
-                   column(4, br(), actionButton("scan_fastqs", "Scan FASTQ folder", class = "btn-primary"))
+                   column(7, textInput("metadata_cols", "Metadata columns", value = "treatment", placeholder = "treatment, batch, replicate")),
+                   column(5, br(),
+                          div(class = "button-row",
+                              actionButton("scan_fastqs", "Scan FASTQ folder", class = "btn-primary"),
+                              actionButton("add_metadata_col", "Add metadata column", class = "btn-default")
+                          ))
                  ),
                  uiOutput("design_editor_ui"),
                  br(),
@@ -1252,16 +1326,27 @@ server <- function(input, output, session) {
     p[[idx]]
   })
 
-  output$project_paths <- renderText({
+  output$project_card <- renderUI({
     p <- current_project()
-    paste(c(
-      paste("Project:", p$label),
-      paste("Analysis:", p$analysis),
-      paste("Genome:", p$genome),
-      paste("Data:", p$data_dir),
-      paste("Design:", p$design_matrix_path),
-      paste("FASTQ:", p$fastq_dir)
-    ), collapse = "\n")
+    badge_class <- paste("analysis-badge", p$analysis_key)
+    div(class = "project-card",
+        div(class = "project-card-top",
+            div(class = "project-title-wrap",
+                div(class = "eyebrow", "Selected project"),
+                h3(p$label)
+            ),
+            span(class = badge_class, p$analysis)
+        ),
+        div(class = "project-meta-row",
+            span(class = "meta-chip", paste("Genome", p$genome)),
+            span(class = "meta-chip", if (isTRUE(p$paired_end)) "Paired-end" else "Single-end")
+        ),
+        div(class = "path-list",
+            div(class = "path-item", span("Data"), code(p$data_dir)),
+            div(class = "path-item", span("Design"), code(p$design_matrix_path)),
+            div(class = "path-item", span("FASTQ"), code(p$fastq_dir %||% "Not set"))
+        )
+    )
   })
 
   output$setup_table <- renderTable({
@@ -1276,7 +1361,10 @@ server <- function(input, output, session) {
   output$source_config_ui <- renderUI({
     p <- current_project()
     if (!nzchar(p$source_config)) return(NULL)
-    tagList(h4("Imported CodeSpringLab Config"), tags$pre(p$source_config))
+    div(class = "config-card",
+        div(class = "eyebrow", "Imported CodeSpringLab config"),
+        code(p$source_config)
+    )
   })
 
   output$create_project_status <- renderText("")
@@ -1290,12 +1378,34 @@ server <- function(input, output, session) {
     output$create_project_status <- renderText(msg)
   })
 
-  observeEvent(input$scan_fastqs, {
-    p <- current_project()
-    cols <- clean_name(unlist(strsplit(input$metadata_cols, ",")))
+  metadata_cols_from_input <- reactive({
+    cols <- clean_name(unlist(strsplit(input$metadata_cols %||% "", ",")))
     cols <- cols[nzchar(cols) & !cols %in% c("sample", "filename", "include", "status")]
     if (!length(cols)) cols <- "treatment"
-    design_state(scan_fastqs(p$fastq_dir, p$paired_end, cols))
+    unique(cols)
+  })
+
+  observeEvent(input$scan_fastqs, {
+    p <- current_project()
+    design_state(scan_fastqs(p$fastq_dir, p$paired_end, metadata_cols_from_input()))
+  })
+
+  observeEvent(input$add_metadata_col, {
+    df <- collect_design_inputs(input, design_state())
+    if (!NROW(df)) {
+      df <- data.frame(include = logical(), sample = character(), filename = character(), status = character())
+    }
+    added <- character(0)
+    for (col in metadata_cols_from_input()) {
+      if (!col %in% names(df)) {
+        df[[col]] <- ""
+        added <- c(added, col)
+      }
+    }
+    if (length(added)) {
+      df <- df[, design_matrix_columns(df), drop = FALSE]
+      design_state(df)
+    }
   })
 
   observeEvent(current_project(), {
@@ -1374,7 +1484,7 @@ server <- function(input, output, session) {
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
-    job_history(current_project())
+    job_history_display(current_project())
   }, page_length = 10)
 
   output$run_pipeline_stepper <- renderUI({
@@ -1530,8 +1640,8 @@ server <- function(input, output, session) {
   output$all_file_ui <- renderUI({ file_select("all_file", "Result file", current_project()$data_dir, "\\.(txt|csv|tsv|html|png|pdf)$") })
   output$all_file_view <- renderUI({ req(input$all_file); image_or_file_ui(input$all_file) })
   output$jobs_table <- render_csl_table({
-    if (!file.exists(JOBS_PATH)) return(data.frame())
-    utils::read.delim(JOBS_PATH, check.names = FALSE)
+    progress_refresh()
+    job_history_display(current_project())
   }, page_length = 25)
 
   output$log_file_ui <- renderUI({
