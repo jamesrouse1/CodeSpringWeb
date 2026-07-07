@@ -530,6 +530,48 @@ write_design_matrix <- function(project, df, metadata_cols) {
   out
 }
 
+project_design_df <- function(project) {
+  df <- safe_read_table(project$design_matrix_path)
+  if (!NROW(df)) return(data.frame())
+  if (!"sample" %in% names(df)) names(df)[1] <- "sample"
+  df
+}
+
+design_compare_columns <- function(project) {
+  df <- project_design_df(project)
+  if (!NROW(df)) return(character(0))
+  nms <- names(df)
+  sample_i <- match("sample", nms)
+  filename_i <- match("filename", nms)
+  if (!is.na(sample_i) && !is.na(filename_i) && filename_i > sample_i + 1) {
+    cols <- nms[(sample_i + 1):(filename_i - 1)]
+  } else {
+    cols <- setdiff(nms, c("sample", "filename", "include", "status"))
+  }
+  setdiff(cols, c("include", "status"))
+}
+
+design_compare_values <- function(project, col) {
+  df <- project_design_df(project)
+  if (!NROW(df) || !nzchar(col %||% "") || !col %in% names(df)) return(character(0))
+  vals <- unique(as.character(df[[col]]))
+  vals <- vals[!is.na(vals) & nzchar(vals)]
+  sort(vals)
+}
+
+deseq_design_for_column <- function(project, compare_col) {
+  df <- project_design_df(project)
+  if (!NROW(df)) stop("No design matrix found.")
+  if (!compare_col %in% names(df)) stop("Selected comparison column is not in design matrix: ", compare_col)
+  if (!"filename" %in% names(df)) df$filename <- df$sample
+  keep <- df[, c("sample", compare_col, "filename"), drop = FALSE]
+  out_dir <- file.path(project$data_dir, "manifest", paste0("deseq2_", clean_name(compare_col, "comparison")))
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  out <- file.path(out_dir, "design_matrix.txt")
+  utils::write.table(keep, out, sep = "\t", row.names = FALSE, quote = FALSE)
+  out
+}
+
 count_files <- function(path, pattern) {
   if (!dir.exists(path)) return(0)
   length(list.files(path, pattern = pattern, recursive = TRUE, full.names = TRUE))
@@ -586,21 +628,45 @@ last_job_modes <- function(project) {
 }
 
 log_file_choices <- function(project) {
-  jobs <- job_history(project)
-  if (!NROW(jobs)) return(character(0))
-  vals <- c()
-  for (i in seq_len(NROW(jobs))) {
-    label_base <- paste(jobs$time[i] %||% "", jobs$step[i] %||% "", jobs$job_id[i] %||% "")
-    if ("stdout" %in% names(jobs) && nzchar(jobs$stdout[i] %||% "")) vals[paste(label_base, "stdout")] <- jobs$stdout[i]
-    if ("stderr" %in% names(jobs) && nzchar(jobs$stderr[i] %||% "")) vals[paste(label_base, "stderr")] <- jobs$stderr[i]
+  vals <- character(0)
+  add_log_choice <- function(label, path) {
+    path <- as.character(path %||% "")
+    path <- path[!is.na(path) & nzchar(path)]
+    if (!length(path)) return(invisible(NULL))
+    for (one_path in path) vals[[paste(label, basename(one_path))]] <<- one_path
+    invisible(NULL)
   }
-  vals[file.exists(vals)]
+
+  project_log_dir <- file.path(dirname(project$data_dir), "log")
+  if (dir.exists(project_log_dir)) {
+    files <- list.files(project_log_dir, pattern = "^(output|error)_.*\\.txt$", full.names = TRUE)
+    add_log_choice("Project log", files)
+  }
+
+  jobs <- job_history(project)
+  if (NROW(jobs)) {
+    for (i in seq_len(NROW(jobs))) {
+      label_base <- paste(jobs$time[i] %||% "", jobs$step[i] %||% "", jobs$job_id[i] %||% "")
+      if ("stdout" %in% names(jobs)) add_log_choice(paste(label_base, "stdout"), jobs$stdout[i])
+      if ("stderr" %in% names(jobs)) add_log_choice(paste(label_base, "stderr"), jobs$stderr[i])
+    }
+  }
+
+  vals <- as.character(vals)
+  vals <- vals[!is.na(vals) & nzchar(vals)]
+  vals <- vals[file.exists(vals)]
+  vals <- vals[!duplicated(vals)]
+  vals
 }
 
-read_log_tail <- function(path, n = 300) {
+read_log_excerpt <- function(path, mode = "tail", n = 120) {
   if (!nzchar(path %||% "") || !file.exists(path)) return("")
   lines <- readLines(path, warn = FALSE)
-  paste(utils::tail(lines, n), collapse = "\n")
+  mode <- mode %||% "tail"
+  if (identical(mode, "head")) lines <- utils::head(lines, n)
+  else if (identical(mode, "full")) lines <- lines
+  else lines <- utils::tail(lines, n)
+  paste(lines, collapse = "\n")
 }
 
 active_job_steps <- function(project) {
@@ -881,13 +947,14 @@ submit_featurecounts_jobs <- function(project, feature = "gene_id") {
   }, character(1)), collapse = "\n")
 }
 
-submit_deseq2_job <- function(project, reference, comparison, redundant = "NoRedundant") {
+submit_deseq2_job <- function(project, compare_col, reference, comparison, redundant = "NoRedundant") {
   outdir <- file.path(project$data_dir, "deseq2")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   script <- file.path(SCRIPTS_DIR, "DESeq2", "qsub_deseq2.sh")
   rscript <- file.path(SCRIPTS_DIR, "DESeq2", "DESeq2.R")
   count_matrix <- file.path(project$data_dir, "counts", "count_matrix.txt")
-  submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, project$design_matrix_path, outdir, reference, comparison, redundant, project$name), "deseq2", paste(reference, "vs", comparison))
+  design_matrix <- deseq_design_for_column(project, compare_col)
+  submit_sbatch(project, "DESeq2", script, c(rscript, count_matrix, design_matrix, outdir, reference, comparison, redundant, project$name), "deseq2", paste(compare_col, reference, "vs", comparison))
 }
 
 write_native_shiny_config <- function(project) {
@@ -1011,10 +1078,10 @@ body { background:#eef3f8; color:#17202f; }
 .navbar, .navbar-default { background:#0f1724 !important; border:0; }
 .navbar-default .navbar-nav > li > a, .navbar-default .navbar-brand { color:#f8fafc !important; }
 .well, .panel, .tab-content { border-radius:8px; border-color:#d8dde8; }
-.csl-header { background:linear-gradient(135deg,#0f2742 0%,#145f78 58%,#1f8f7a 100%); color:white; border:0; border-radius:8px; padding:18px 22px; margin-bottom:14px; display:flex; align-items:center; justify-content:space-between; gap:20px; }
-.brand-lockup { display:flex; align-items:center; gap:16px; }
-.brand-lockup img { background:white; border-radius:8px; padding:7px; max-height:54px; max-width:150px; object-fit:contain; }
-.csl-header h2 { margin:0 0 5px 0; font-weight:700; color:white; }
+.csl-header { background:linear-gradient(135deg,#0f2742 0%,#145f78 58%,#1f8f7a 100%); color:white; border:0; border-radius:8px; padding:28px 34px; margin-bottom:16px; min-height:128px; display:flex; align-items:center; justify-content:space-between; gap:26px; }
+.brand-lockup { display:flex; align-items:center; gap:22px; }
+.brand-lockup img { background:white; border-radius:8px; padding:9px; max-height:78px; max-width:210px; object-fit:contain; }
+.csl-header h2 { margin:0 0 6px 0; font-weight:800; font-size:32px; color:white; }
 .csl-header .muted { color:#dceaf4; }
 .muted { color:#657084; }
 .empty-box { background:white; border:1px solid #d8dde8; border-radius:8px; padding:18px; color:#657084; }
@@ -1060,6 +1127,7 @@ body { background:#eef3f8; color:#17202f; }
 .step-index { width:28px; height:28px; border-radius:50%; background:white; display:flex; align-items:center; justify-content:center; font-weight:700; }
 .step-main { display:flex; flex-direction:column; line-height:1.2; }
 .step-main span, .step-main em { font-size:12px; color:#657084; margin-top:3px; font-style:normal; }
+.log-viewer { max-height:620px; overflow:auto; background:#0d1623; color:#d9e8ff; border-radius:8px; border:1px solid #1f3857; padding:14px; }
 .native-results-host { margin: 0 !important; width:100% !important; }
 .native-results-host > .container-fluid { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 6px 0 18px 0 !important; }
 .native-results-host .app-shell { border-radius: 10px !important; box-shadow: none !important; margin:0 !important; }
@@ -1074,7 +1142,7 @@ ui <- fluidPage(
           if (file.exists(LOGO_PATH)) tags$img(src = file.path("codespring_logo", basename(LOGO_PATH))),
           div(h2("CodeSpringWeb"), div(class = "muted", "Shiny control center for CodeSpringLab projects: configure, run, track, and visualize results from one port."))
       ),
-      if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH)), style = "max-height:58px;background:white;border-radius:8px;padding:7px;")
+      if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH)), style = "max-height:82px;max-width:230px;background:white;border-radius:8px;padding:9px;object-fit:contain;")
   ),
   sidebarLayout(
     sidebarPanel(
@@ -1125,7 +1193,7 @@ ui <- fluidPage(
                  br(),
                  verbatimTextOutput("run_output")),
         tabPanel("Results Explorer", uiOutput("native_results_ui")),
-        tabPanel("Logs", br(), h3("Submitted Jobs"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(textOutput("selected_log_text")))
+        tabPanel("Logs", br(), h3("Submitted Jobs"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text")))
       )
     )
   )
@@ -1352,9 +1420,24 @@ server <- function(input, output, session) {
         tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id")),
         "run_featurecounts", "Submit featureCounts"),
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
-        tagList(textInput("deseq_reference", "DESeq2 reference", value = "control"),
-                textInput("deseq_comparison", "DESeq2 comparison", value = "treated")),
+        uiOutput("deseq_controls_ui"),
         "run_deseq2", "Submit DESeq2")
+    )
+  })
+
+  output$deseq_controls_ui <- renderUI({
+    p <- current_project()
+    cols <- design_compare_columns(p)
+    if (!length(cols)) return(div(class = "empty-box", "No comparison columns found between sample and filename in design_matrix.txt."))
+    selected_col <- input$deseq_compare_col %||% if ("treatment" %in% cols) "treatment" else cols[[1]]
+    if (!selected_col %in% cols) selected_col <- cols[[1]]
+    vals <- design_compare_values(p, selected_col)
+    ref <- input$deseq_reference %||% if (length(vals)) vals[[1]] else ""
+    comp <- input$deseq_comparison %||% if (length(vals) > 1) vals[[2]] else ref
+    tagList(
+      selectInput("deseq_compare_col", "Comparison column", choices = cols, selected = selected_col),
+      selectInput("deseq_reference", "Reference/baseline", choices = vals, selected = ref),
+      selectInput("deseq_comparison", "Comparison", choices = vals, selected = comp)
     )
   })
 
@@ -1382,7 +1465,7 @@ server <- function(input, output, session) {
     if (identical(input$deseq_reference, input$deseq_comparison)) {
       run_message("Reference and comparison must be different.")
     } else {
-      run_message(submit_deseq2_job(current_project(), input$deseq_reference, input$deseq_comparison, "NoRedundant"))
+      run_message(submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant"))
     }
     progress_refresh(Sys.time())
   })
@@ -1453,13 +1536,16 @@ server <- function(input, output, session) {
 
   output$log_file_ui <- renderUI({
     choices <- log_file_choices(current_project())
-    if (!length(choices)) return(div(class = "empty-box", "No stdout/stderr log files were found for this project yet."))
-    selectInput("selected_log_file", "Open job log", choices = choices)
+    if (!length(choices)) return(div(class = "empty-box", paste("No stdout/stderr log files were found in", file.path(dirname(current_project()$data_dir), "log"))))
+    tagList(
+      selectInput("selected_log_file", "Open job log", choices = choices),
+      radioButtons("log_view_mode", "View", choices = c("Tail" = "tail", "Head" = "head", "Full" = "full"), selected = "tail", inline = TRUE)
+    )
   })
 
   output$selected_log_text <- renderText({
     req(input$selected_log_file)
-    read_log_tail(input$selected_log_file)
+    read_log_excerpt(input$selected_log_file, input$log_view_mode %||% "tail")
   })
 }
 
