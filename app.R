@@ -1940,8 +1940,8 @@ server <- function(input, output, session) {
     choices <- stats::setNames(vapply(p, `[[`, character(1), "id"), vapply(p, `[[`, character(1), "label"))
     tagList(
       tags$hr(),
-      details(class = "project-manage",
-        summary("Manage projects"),
+      tags$details(class = "project-manage",
+        tags$summary("Manage projects"),
         div(class = "muted small-note", "Delete saved project files from project_configs. Data deletion is optional and asks for confirmation."),
         checkboxGroupInput("delete_project_ids", "Projects to delete", choices = choices),
         checkboxInput("delete_project_data", "Also delete associated data folders", value = FALSE),
