@@ -422,17 +422,61 @@ delete_projects <- function(projects_to_delete, delete_data = FALSE) {
       messages <- c(messages, paste("Skipped unmanaged config:", if (nzchar(cfg)) cfg else project$label))
     }
     if (isTRUE(delete_data)) {
-      data_dir_raw <- trimws(as.character(project$data_dir %||% ""))
-      data_dir <- if (nzchar(data_dir_raw)) normalizePath(data_dir_raw, winslash = "/", mustWork = FALSE) else ""
-      if (nzchar(data_dir) && dir.exists(data_dir)) {
-        ok <- unlink(data_dir, recursive = TRUE, force = TRUE) == 0
-        messages <- c(messages, paste(if (ok) "Deleted data:" else "Could not delete data:", data_dir))
-      } else {
-        messages <- c(messages, paste("No data folder found for:", project$label))
-      }
+      deleted <- delete_project_results(project)
+      messages <- c(messages, deleted$message)
     }
   }
   paste(messages, collapse = "\n")
+}
+
+project_result_dir <- function(project) {
+  data_dir <- normalizePath(project$data_dir %||% "", winslash = "/", mustWork = FALSE)
+  if (nzchar(data_dir) && basename(data_dir) == "data") return(dirname(data_dir))
+  file.path(normalizePath(project$results_root %||% "~/csl_results", winslash = "/", mustWork = FALSE), project$name %||% project$label)
+}
+
+project_result_dir_is_safe <- function(project, path = project_result_dir(project)) {
+  path <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  root <- normalizePath(project$results_root %||% "", winslash = "/", mustWork = FALSE)
+  nzchar(path) &&
+    nzchar(root) &&
+    startsWith(path, paste0(sub("/+$", "", root), "/")) &&
+    basename(path) == (project$name %||% project$label)
+}
+
+dir_has_contents <- function(path) {
+  dir.exists(path) && length(list.files(path, all.files = TRUE, no.. = TRUE)) > 0
+}
+
+prune_project_job_history <- function(project) {
+  if (!file.exists(JOBS_PATH)) return(invisible(0))
+  jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE, fill = TRUE), error = function(e) data.frame())
+  if (!NROW(jobs)) return(invisible(0))
+  remove <- rep(FALSE, NROW(jobs))
+  if ("project_id" %in% names(jobs) && nzchar(project$id %||% "")) remove <- remove | jobs$project_id == project$id
+  if ("data_dir" %in% names(jobs) && nzchar(project$data_dir %||% "")) remove <- remove | jobs$data_dir == project$data_dir
+  if (!any(remove) && "project" %in% names(jobs) && nzchar(project$name %||% "")) remove <- jobs$project == project$name
+  removed <- sum(remove)
+  jobs <- jobs[!remove, , drop = FALSE]
+  utils::write.table(jobs, JOBS_PATH, sep = "\t", row.names = FALSE, quote = TRUE, append = FALSE, col.names = TRUE)
+  invisible(removed)
+}
+
+delete_project_results <- function(project) {
+  result_dir <- project_result_dir(project)
+  if (!project_result_dir_is_safe(project, result_dir)) {
+    return(list(ok = FALSE, message = paste("Refusing to delete unexpected project path:", result_dir)))
+  }
+  if (!dir.exists(result_dir)) {
+    removed_jobs <- prune_project_job_history(project)
+    return(list(ok = TRUE, message = paste("No project results folder found for:", project$label, sprintf("(removed %s old job record%s)", removed_jobs, ifelse(removed_jobs == 1, "", "s")))))
+  }
+  ok <- unlink(result_dir, recursive = TRUE, force = TRUE) == 0
+  removed_jobs <- prune_project_job_history(project)
+  list(
+    ok = ok,
+    message = paste(if (ok) "Deleted project results:" else "Could not delete project results:", result_dir, sprintf("(removed %s old job record%s)", removed_jobs, ifelse(removed_jobs == 1, "", "s")))
+  )
 }
 
 write_project_config <- function(project) {
@@ -2980,7 +3024,7 @@ ui <- fluidPage(
   div(class = "csl-header",
       div(class = "brand-lockup",
           if (file.exists(LOGO_PATH)) tags$img(src = file.path("codespring_logo", basename(LOGO_PATH))),
-          div(h2("CodeSpringWeb"), div(class = "muted", "Shiny control center for CodeSpringLab projects: configure, run, track, and visualize results from one port."))
+          div(h2("CodeSpringWeb"), div(class = "muted", "Developed by James Rouse, Rad Utama and Alex Dobin (Bioinformatics Shared Resource)"))
       ),
       if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH)), style = "max-height:120px;max-width:300px;background:white;border-radius:8px;padding:10px;object-fit:contain;")
   ),
@@ -3286,6 +3330,7 @@ server <- function(input, output, session) {
           textInput("new_design_matrix_path", "Design matrix folder", value = "", placeholder = "Optional; folder containing or receiving design_matrix.txt"),
           actionButton("browse_new_design_matrix_path", "Browse server", class = "btn-default")
       ),
+      checkboxInput("new_clear_existing_results", "Clear existing results if this project folder already exists", value = FALSE),
       actionButton("create_project_config", "Create project", class = "btn-primary"),
       textOutput("create_project_status")
     )
@@ -3392,11 +3437,11 @@ server <- function(input, output, session) {
     }
     if (isTRUE(input$delete_project_data)) {
       labels <- vapply(to_delete, `[[`, character(1), "label")
-      data_dirs <- vapply(to_delete, `[[`, character(1), "data_dir")
+      result_dirs <- vapply(to_delete, project_result_dir, character(1))
       showModal(modalDialog(
-        title = "Delete project data?",
-        tags$p("This will delete the selected project config file(s) and permanently remove these data folders:"),
-        tags$ul(lapply(seq_along(labels), function(i) tags$li(tags$strong(labels[[i]]), tags$br(), code(data_dirs[[i]])))),
+        title = "Delete project results?",
+        tags$p("This will delete the selected project config file(s), old job records, logs, Shiny output, and data under these project result folders:"),
+        tags$ul(lapply(seq_along(labels), function(i) tags$li(tags$strong(labels[[i]]), tags$br(), code(result_dirs[[i]])))),
         tags$p(tags$strong("This cannot be undone.")),
         footer = tagList(
           modalButton("Cancel"),
@@ -3426,6 +3471,20 @@ server <- function(input, output, session) {
     }
     p <- new_project_from_inputs(input)
     msg <- tryCatch({
+      result_dir <- project_result_dir(p)
+      if (dir_has_contents(result_dir)) {
+        if (!isTRUE(input$new_clear_existing_results)) {
+          stop(
+            "A project results folder already exists at ", result_dir,
+            ". Check 'Clear existing results if this project folder already exists' to start fresh, ",
+            "or choose a different project name."
+          )
+        }
+        deleted <- delete_project_results(p)
+        if (!isTRUE(deleted$ok)) stop(deleted$message)
+      } else {
+        prune_project_job_history(p)
+      }
       cfg <- write_project_config(p)
       projects(discover_projects())
       write_last_project_id(p$id)
