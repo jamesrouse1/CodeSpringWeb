@@ -87,6 +87,7 @@ APP_HOME <- path.expand(Sys.getenv("CSL_WEB_HOME", unset = "~/.codespringweb"))
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
+PROGRESS_REFRESH_MS <- 30000
 LOGO_CSL_PATH <- file.path(SCRIPTS_DIR, "Logo_CSL.png")
 LOGO_PATH <- file.path(SCRIPTS_DIR, "Logo.png")
 FLOWCHART_PATH <- file.path(SCRIPTS_DIR, "flowchart.png")
@@ -1236,6 +1237,42 @@ sample_progress_matrix_ui <- function(progress_df) {
   )
 }
 
+sample_progress_step_ui <- function(progress_df, step) {
+  if (!NROW(progress_df) || !"step" %in% names(progress_df)) return(NULL)
+  hit <- progress_df[progress_df$step == step, , drop = FALSE]
+  if (!NROW(hit)) return(NULL)
+  active_statuses <- c("Waiting", "Running", "Running, no growth yet", "Possibly incomplete")
+  if (!any(hit$status %in% active_statuses)) return(NULL)
+  hit <- hit[order(hit$sample), , drop = FALSE]
+  div(
+    class = "tool-progress-wrap",
+    div(class = "tool-progress-title", "Sample progress"),
+    tags$table(
+      class = "tool-progress-table",
+      tags$thead(tags$tr(
+        tags$th("Sample"),
+        tags$th("Status"),
+        tags$th("Bytes"),
+        tags$th("SLURM")
+      )),
+      tags$tbody(lapply(seq_len(NROW(hit)), function(i) {
+        title <- paste0(
+          "Status: ", hit$status[i],
+          "\nBytes: ", hit$output_bytes[i],
+          "\nPath: ", hit$target[i],
+          if (nzchar(hit$note[i])) paste0("\nNote: ", hit$note[i]) else ""
+        )
+        tags$tr(
+          tags$td(class = "sample-name", hit$sample[i]),
+          tags$td(tags$span(class = status_class(hit$status[i]), title = title, hit$display_status[i])),
+          tags$td(format(hit$output_bytes[i], big.mark = ",", scientific = FALSE)),
+          tags$td(if (nzchar(hit$slurm_state[i])) hit$slurm_state[i] else "-")
+        )
+      }))
+    )
+  )
+}
+
 save_job <- function(project, step, command, output = "") {
   row <- data.frame(
     time = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
@@ -1761,7 +1798,7 @@ pipeline_stepper_ui <- function(project) {
   }))
 }
 
-tool_panel <- function(step, status, description, controls, button_id, button_label) {
+tool_panel <- function(step, status, description, controls, button_id, button_label, progress_df = data.frame()) {
   st <- status$status[match(step, status$step)] %||% "Not started"
   mode <- status$input[match(step, status$step)] %||% ""
   cls <- switch(st, "Complete" = "complete", "Active" = "active", "not-started")
@@ -1776,7 +1813,8 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
     ),
     div(class = "tool-body",
         controls,
-        actionButton(button_id, button_label, class = "btn-primary")
+        actionButton(button_id, button_label, class = "btn-primary"),
+        if (identical(st, "Active")) sample_progress_step_ui(progress_df, step) else NULL
     )
   )
 }
@@ -1840,6 +1878,14 @@ body { background:#eef3f8; color:#17202f; }
 .tool-right small { color:#657084; }
 .tool-body { padding:0 16px 16px 16px; border-top:1px solid #edf1f6; }
 .tool-body .form-group { margin-bottom:10px; }
+.tool-progress-wrap { margin-top:14px; border:1px solid #d8dde8; border-radius:8px; overflow:hidden; background:#f8fafc; }
+.tool-progress-title { padding:9px 11px; font-size:12px; font-weight:800; color:#304a66; text-transform:uppercase; letter-spacing:.04em; border-bottom:1px solid #d8dde8; background:#edf4fb; }
+.tool-progress-table { width:100%; border-collapse:separate; border-spacing:0; table-layout:fixed; }
+.tool-progress-table th { padding:8px 10px; font-size:11px; color:#657084; text-align:left; border-bottom:1px solid #e4eaf2; background:white; }
+.tool-progress-table td { padding:8px 10px; font-size:12px; border-bottom:1px solid #edf1f6; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tool-progress-table tr:last-child td { border-bottom:0; }
+.tool-progress-table .sample-status { min-width:0; width:auto; max-width:100%; }
+.tool-progress-table .sample-name { font-weight:800; color:#17202f; }
 .resource-strip { display:grid; grid-template-columns:minmax(280px,.85fr) minmax(460px,1.45fr); gap:16px; align-items:stretch; margin:12px 0 18px 0; }
 .resource-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:16px; }
 .resource-card.flowchart-card { display:flex; align-items:center; justify-content:center; min-height:360px; overflow:hidden; }
@@ -2696,12 +2742,12 @@ server <- function(input, output, session) {
   })
 
   observe({
-    invalidateLater(10000, session)
+    invalidateLater(PROGRESS_REFRESH_MS, session)
     progress_refresh(Sys.time())
   })
 
   output$progress_updated <- renderText({
-    paste("Auto-refreshes every 10 seconds. Last checked:", format(progress_refresh(), "%Y-%m-%d %H:%M:%S"))
+    paste("Auto-refreshes every", PROGRESS_REFRESH_MS / 1000, "seconds. Last checked:", format(progress_refresh(), "%Y-%m-%d %H:%M:%S"))
   })
 
   progress_status <- reactive({
@@ -2755,11 +2801,13 @@ server <- function(input, output, session) {
 
   output$run_step_cards <- renderUI({
     progress_refresh()
-    status <- project_status(current_project())
+    p <- current_project()
+    status <- project_status(p)
+    progress_df <- sample_progress_state()
     div(class = "run-grid",
       tool_panel("FastQC", status, "Quality reports for raw or trimmed reads.",
         tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = FALSE)),
-        "run_fastqc", "Submit FastQC"),
+        "run_fastqc", "Submit FastQC", progress_df),
       tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
         tagList(
           selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = adapter_choices_r1(), selected = adapter_choices_r1()[[1]], width = "100%", selectize = FALSE),
@@ -2768,22 +2816,22 @@ server <- function(input, output, session) {
           conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = "", width = "100%")),
           textInput("cutadapt_min_length", "Minimum read length", value = "20")
         ),
-        "run_cutadapt", "Submit cutadapt"),
+        "run_cutadapt", "Submit cutadapt", progress_df),
       tool_panel("STAR", status, "Align raw or trimmed reads to the selected genome index.",
         tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = TRUE)),
-        "run_star", "Submit STAR"),
+        "run_star", "Submit STAR", progress_df),
       tool_panel("RSEM optional", status, "Optional transcript/gene quantification from STAR BAM and transcriptome BAM outputs.",
         tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
-        "run_rsem", "Submit RSEM"),
+        "run_rsem", "Submit RSEM", progress_df),
       tool_panel("Kallisto optional", status, "Optional transcript abundance quantification from raw or trimmed reads.",
         tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = TRUE)),
-        "run_kallisto", "Submit Kallisto"),
+        "run_kallisto", "Submit Kallisto", progress_df),
       tool_panel("featureCounts", status, "Quantify STAR BAM files with the selected GTF attribute.",
         tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
-        "run_featurecounts", "Submit featureCounts"),
+        "run_featurecounts", "Submit featureCounts", progress_df),
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
         uiOutput("deseq_controls_ui"),
-        "run_deseq2", "Submit DESeq2")
+        "run_deseq2", "Submit DESeq2", progress_df)
     )
   })
 
