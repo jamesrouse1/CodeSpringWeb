@@ -1,6 +1,15 @@
 # CodeSpringWeb
 
-CodeSpringWeb is now a Shiny app for running and reviewing CodeSpringLab projects from one server port.
+CodeSpringWeb is a Shiny control center for running and reviewing CodeSpringLab projects from one server port.
+
+It provides a button-driven interface for:
+
+- Creating or selecting RNA-seq projects
+- Building/editing design matrices from FASTQ folders
+- Submitting CodeSpringLab SLURM jobs
+- Tracking per-sample and per-comparison progress
+- Opening the native CodeSpringLab RNA-seq Results Explorer inside the same app
+- Viewing logs, submitted jobs, methods, tool versions, and reference genome details
 
 It discovers existing CodeSpringLab notebook configs from:
 
@@ -11,12 +20,20 @@ It discovers existing CodeSpringLab notebook configs from:
 
 ## Run On The Server
 
+Use the launcher script. It installs the required R packages into your user library if they are missing, clears stale CodeSpringWeb listeners on the chosen port, starts Shiny in the background, and prints the exact SSH tunnel command for your laptop.
+
 ```bash
 cd ~/CodeSpringWeb
-CSL_CODESPRINGLAB_ROOT=~/CodeSpringLab Rscript -e 'shiny::runApp(".", host="0.0.0.0", port=8501)'
+./run_codespringweb.sh
 ```
 
-From your laptop:
+To choose a different port:
+
+```bash
+./run_codespringweb.sh 8601
+```
+
+From your laptop, run the SSH tunnel printed by the launcher. It will look like this:
 
 ```bash
 ssh -N -L 8501:localhost:8501 rouse@bamdev1
@@ -30,50 +47,75 @@ http://localhost:8501
 
 ## Tabs
 
-- `Setup`: selected project paths and imported config.
-- `Design Matrix`: scan FASTQs, edit metadata, and save `design_matrix.txt`.
-- `Progress`: color-coded `Active`, `Complete`, and `Not started` step cards plus sample-level progress.
-- `Run Pipeline`: professional run cards that submit real SLURM `sbatch` jobs for FastQC, cutadapt, STAR, Kallisto, featureCounts, and DESeq2. Submitted jobs keep running after the app or browser is closed.
-- `Results Explorer`: sources CodeSpringLab's native `scripts_DoNotTouch/Shiny/app_server.R`, so the viewer matches the RNA-seq Shiny app instead of maintaining a separate clone.
-- `Logs`: job submissions started from this app.
+- `Setup`: select an analysis type and project, create new projects, browse server folders, and manage old project configs/results.
+- `Design Matrix`: scan FASTQ folders, include/exclude samples, edit sample names and metadata, and save a project-local `design_matrix.txt`.
+- `Progress`: color-coded step cards and sample-by-step progress for completed, active, and not-started work.
+- `Run Pipeline`: submit real SLURM `sbatch` jobs for FastQC, cutadapt, STAR, featureCounts, DESeq2, GSEA, RSEM, and Kallisto. Submitted jobs keep running after the app or browser is closed.
+- `Results Explorer`: loads CodeSpringLab's native `scripts_DoNotTouch/Shiny/app_server.R`, so the viewer matches the RNA-seq Shiny app while staying inside CodeSpringWeb.
+- `Logs`: view submitted jobs and project logs by tool/output/error type.
+- `Methods`: summarize tool versions, genome/reference selections, and methods text for completed/submitted work.
 
 ## R Packages
 
 Required:
 
 ```r
-install.packages("shiny")
+install.packages(c("shiny", "DT", "base64enc", "ggplot2"))
+install.packages("BiocManager")
+BiocManager::install("fgsea")
 ```
 
-Optional but nicer:
+The launcher handles these automatically:
 
-```r
-install.packages(c("DT", "base64enc"))
-```
-
-`DT` enables editable/searchable/scrollable tables. Without it, the app still launches with standard Shiny tables, matching the original CodeSpringLab Shiny fallback behavior.
-
+- `DT`: editable/searchable/scrollable tables
+- `base64enc`: embedded logos/images
+- `ggplot2`: publication-style GSEA plots
+- `fgsea`: R-native GSEA engine used by CodeSpringWeb pathway analysis
 
 ## Job Submission
 
-Run buttons call `sbatch` from the matching CodeSpringLab analysis folder, so jobs are owned by SLURM after submission. Closing the browser or stopping the Shiny app does not cancel jobs that were already accepted by `sbatch`.
+Run buttons submit jobs through `sbatch`, so jobs are owned by SLURM after submission. Closing the browser or stopping the Shiny app does not cancel jobs already accepted by SLURM.
 
+CodeSpringWeb records submitted job metadata under `~/.codespringweb/` and project logs under:
+
+```text
+<results_root>/<project_name>/log/
+```
+
+## GSEA
+
+GSEA jobs are submitted as R jobs using `fgsea`.
+
+The app uses:
+
+- DESeq2 normalized counts from `<project>/data/deseq2`
+- The selected design-matrix comparison column
+- Signal-to-noise ranking
+- Gene-set permutations
+- Seed `8`
+- Enrichr/GMT-style gene-set databases
+- The bundled local mouse-human ortholog table for mouse projects
+
+Outputs are written under:
+
+```text
+<project>/data/gseapy/<comparison>_vs_<reference>/
+```
+
+The folder name remains `gseapy` for compatibility with the existing CodeSpringLab Results Explorer, but newly submitted jobs use the R/fgsea implementation.
 
 ## Port Cleanup
 
-By default, CodeSpringWeb checks for older CodeSpring/R Shiny sessions and stops them before starting. To disable that behavior:
+The launcher stops stale listeners on the requested port before starting the app. The app itself also checks for older CodeSpring/R Shiny sessions on startup unless disabled:
 
 ```bash
 CSL_WEB_AUTOKILL_SHINY=0 CSL_CODESPRINGLAB_ROOT=~/CodeSpringLab Rscript -e 'shiny::runApp(".", host="0.0.0.0", port=8501)'
 ```
-## Server launcher
 
-On bamdev1, start the app with:
+## Useful Environment Variables
 
-```bash
-cd ~/CodeSpringWeb
-./run_codespringweb.sh
-```
-
-The script installs the required `DT` R package into your user library if it is missing, starts Shiny in the background, writes logs to `~/.codespringweb/`, and prints the one SSH tunnel command to run on your laptop.
-
+- `CSL_CODESPRINGLAB_ROOT`: path to the CodeSpringLab repo. Default: `~/CodeSpringLab`
+- `CSL_WEB_HOST`: Shiny host binding. Default: `0.0.0.0`
+- `CSL_WEB_LOG_DIR`: launcher log/pid folder. Default: `~/.codespringweb`
+- `CSL_GSEA_PERMUTATIONS`: number of GSEA permutations. Default: `1000`
+- `CSL_GSEA_ALLOW_BASE_R_FALLBACK=1`: allow the slower base-R fallback if `fgsea` is missing. Production runs should use `fgsea`.

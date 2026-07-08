@@ -1027,7 +1027,7 @@ tool_reference_summary <- function(project) {
     c("Tool", "STAR", command_version("STAR", "--version"), "Spliced alignment", gencode_label(project)),
     c("Tool", "featureCounts / Subread", command_version("featureCounts", "-v"), "Gene-level counting", gencode_label(project)),
     c("Tool", "DESeq2", r_package_version("DESeq2"), "Differential expression", "featureCounts count_matrix.txt"),
-    c("Tool", "R-native GSEA", paste0("R ", getRversion(), "; fgsea optional; ggplot2 ", r_package_version("ggplot2")), "Pathway analysis", "Selected Enrichr/MSigDB-style gene set database"),
+    c("Tool", "R-native GSEA / fgsea", paste0("R ", getRversion(), "; fgsea ", r_package_version("fgsea"), "; ggplot2 ", r_package_version("ggplot2")), "Pathway analysis", "Selected Enrichr/MSigDB-style gene set database"),
     c("Tool", "RSEM", command_version("rsem-calculate-expression", "--version"), "Optional gene/transcript quantification", gencode_label(project)),
     c("Tool", "Kallisto", command_version("kallisto", "version"), "Optional transcript abundance quantification", gencode_label(project)),
     c("Tool", "RSeQC", "not required for core run; strand BED generated with reference", "Optional strand/QC support", gencode_label(project))

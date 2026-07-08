@@ -339,9 +339,12 @@ run_gsea <- function(pathways, stats) {
       check.names = FALSE
     )
     out[order(out$`FDR q-val`, out$`NOM p-val`, -abs(out$NES)), , drop = FALSE]
-  } else {
+  } else if (identical(Sys.getenv("CSL_GSEA_ALLOW_BASE_R_FALLBACK", unset = "0"), "1")) {
+    message2("WARNING: fgsea is not installed. Using slower base-R fallback because CSL_GSEA_ALLOW_BASE_R_FALLBACK=1.")
     out <- fallback_gsea(pathways, stats, nperm = nperm)
     out[order(out$`FDR q-val`, out$`NOM p-val`, -abs(out$NES)), , drop = FALSE]
+  } else {
+    stop("The fgsea R package is required for CodeSpringWeb GSEA. Start the app with run_codespringweb.sh so it can install fgsea into your user R library.")
   }
 }
 
