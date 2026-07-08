@@ -692,8 +692,12 @@ count_files <- function(path, pattern) {
 
 extract_job_id <- function(x) {
   m <- regexpr("job_id:[[:space:]]*[0-9]+", x)
-  if (m < 0) return("")
-  sub("job_id:[[:space:]]*", "", regmatches(x, m))
+  if (m >= 0) return(sub("job_id:[[:space:]]*", "", regmatches(x, m)))
+  m <- regexpr("Job ID:[[:space:]]*[0-9]+", x)
+  if (m >= 0) return(sub("Job ID:[[:space:]]*", "", regmatches(x, m)))
+  m <- regexpr("Submitted batch job[[:space:]]+[0-9]+", x)
+  if (m >= 0) return(sub(".*Submitted batch job[[:space:]]+", "", regmatches(x, m)))
+  ""
 }
 
 job_history <- function(project) {
@@ -712,6 +716,7 @@ job_history <- function(project) {
     jobs <- jobs[jobs$analysis == project$analysis, , drop = FALSE]
   }
   if (!NROW(jobs)) return(data.frame())
+  jobs$step[jobs$step == "Count matrix"] <- "featureCounts"
   jobs$job_id <- vapply(as.character(jobs$output), extract_job_id, character(1))
   jobs$slurm_state <- ifelse(nzchar(jobs$job_id), "Submitted", "No job id")
   jobs$elapsed <- ""
@@ -949,8 +954,10 @@ normalize_pipeline_status <- function(status) {
 project_status <- function(project) {
   data_dir <- project$data_dir
   design <- project$design_matrix_path
+  feature_count_files <- count_files(file.path(data_dir, "featurecounts"), "_counts\\.txt$")
+  feature_matrix_exists <- file.exists(file.path(data_dir, "counts", "count_matrix.txt"))
   raw <- data.frame(
-    step = c("Design matrix", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA"),
+    step = c("Design matrix", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "DESeq2", "GSEA"),
     status = c(
       if (file.exists(design)) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
@@ -958,8 +965,7 @@ project_status <- function(project) {
       if (count_files(file.path(data_dir, "star"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "rsem"), "\\.genes\\.results$") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "kallisto"), "abundance\\.tsv$") > 0) "Complete" else "Not started",
-      if (count_files(file.path(data_dir, "featurecounts"), "_counts\\.txt$") > 0) "Complete" else "Not started",
-      if (file.exists(file.path(data_dir, "counts", "count_matrix.txt"))) "Complete" else "Not started",
+      if (feature_matrix_exists) "Complete" else if (feature_count_files > 0) "Active" else "Not started",
       if (count_files(file.path(data_dir, "deseq2"), "DEG|normalized") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "gseapy"), "\\.(csv|txt|png|pdf)$") > 0) "Complete" else "Not started"
     ),
@@ -970,7 +976,6 @@ project_status <- function(project) {
       file.path(data_dir, "star"),
       file.path(data_dir, "rsem"),
       file.path(data_dir, "kallisto"),
-      file.path(data_dir, "featurecounts"),
       file.path(data_dir, "counts", "count_matrix.txt"),
       file.path(data_dir, "deseq2"),
       file.path(data_dir, "gseapy")
@@ -998,6 +1003,7 @@ project_status <- function(project) {
   }
   active <- active_job_steps(project)
   raw$status[raw$step %in% active & raw$status != "Complete"] <- "Active"
+  if (!feature_matrix_exists && feature_count_files > 0) raw$status[raw$step == "featureCounts"] <- "Active"
   raw$status <- normalize_pipeline_status(raw$status)
   raw
 }
@@ -1007,7 +1013,7 @@ status_rank <- function(status) {
 }
 
 pipeline_order <- function() {
-  c("Design matrix", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "Count matrix", "DESeq2", "GSEA")
+  c("Design matrix", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "DESeq2", "GSEA")
 }
 
 step_order <- function(step) {
@@ -1473,8 +1479,12 @@ sample_fastq_pairs <- function(project, trimmed = FALSE) {
 
 parse_sbatch_job_id <- function(output) {
   m <- regexpr("Submitted batch job[[:space:]]+[0-9]+", output)
-  if (m < 0) return("")
-  sub(".*Submitted batch job[[:space:]]+", "", regmatches(output, m))
+  if (m >= 0) return(sub(".*Submitted batch job[[:space:]]+", "", regmatches(output, m)))
+  m <- regexpr("Job ID:[[:space:]]*[0-9]+", output)
+  if (m >= 0) return(sub("Job ID:[[:space:]]*", "", regmatches(output, m)))
+  m <- regexpr("job_id:[[:space:]]*[0-9]+", output)
+  if (m >= 0) return(sub("job_id:[[:space:]]*", "", regmatches(output, m)))
+  ""
 }
 
 submit_screen_message <- function(step, sample = "", job_id = "", input_mode = "", dependency_ids = character()) {
@@ -1773,7 +1783,7 @@ submit_featurecounts_jobs <- function(project, feature = "gene_id") {
   ids <- vapply(messages, parse_sbatch_job_id, character(1))
   matrix_script <- write_featurecounts_matrix_script(project)
   matrix_cmd <- paste(shQuote(Sys.which("Rscript") %||% "Rscript"), shQuote(matrix_script), shQuote(outdir), shQuote(counts_dir))
-  matrix_msg <- submit_sbatch_wrap(project, "Count matrix", matrix_cmd, "featurecounts_count_matrix", paste("featureCounts matrix; feature", feature), target = file.path(counts_dir, "count_matrix.txt"), reference = res$gtf, dependency_ids = ids)
+  matrix_msg <- submit_sbatch_wrap(project, "featureCounts", matrix_cmd, "featurecounts_count_matrix", paste("matrix build; feature", feature), target = file.path(counts_dir, "count_matrix.txt"), reference = res$gtf, dependency_ids = ids)
   paste(c(messages, matrix_msg), collapse = "\n")
 }
 
@@ -1840,8 +1850,7 @@ run_step_meta <- function() {
       "Align reads and write BAM files.",
       "Optional RSEM transcript/gene quantification.",
       "Optional Kallisto transcript quantification.",
-      "Create gene-level count files.",
-      "Build count_matrix.txt.",
+      "Create gene-level count files and count_matrix.txt.",
       "Run differential expression and normalized counts.",
       "Run pathway analysis."
     ),
