@@ -1568,14 +1568,14 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   paste(commands, collapse = "\n")
 }
 
-submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length, input_trimmed = FALSE) {
-  outdir <- file.path(project$data_dir, if (isTRUE(input_trimmed)) "cutadapt_retrimmed" else "cutadapt")
+submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
+  outdir <- file.path(project$data_dir, "cutadapt")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
-  pairs <- sample_fastq_pairs(project, isTRUE(input_trimmed))
+  pairs <- sample_fastq_pairs(project, FALSE)
   msg <- missing_read_message(project, pairs)
   if (nzchar(msg)) return(msg)
   script <- file.path(SCRIPTS_DIR, if (project$paired_end) "cutadapt_PE/qsub_cutadapt_PE.sh" else "cutadapt_SE/qsub_cutadapt_SE.sh")
-  input_mode <- if (isTRUE(input_trimmed)) "trimmed reads" else "raw reads"
+  input_mode <- "raw reads"
   paste(apply(pairs, 1, function(row) {
     trimmed1 <- file.path(outdir, basename(row[["r1"]]))
     trimmed2 <- if (project$paired_end) file.path(outdir, basename(row[["r2"]])) else trimmed1
@@ -2766,7 +2766,6 @@ server <- function(input, output, session) {
           conditionalPanel("input.cutadapt_adapter1 == '__custom__'", textInput("cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = "", width = "100%")),
           selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = adapter_choices_r2(), selected = adapter_choices_r2()[[1]], width = "100%", selectize = FALSE),
           conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = "", width = "100%")),
-          checkboxInput("cutadapt_use_trimmed_input", "Use existing trimmed reads as cutadapt input", value = FALSE),
           textInput("cutadapt_min_length", "Minimum read length", value = "20")
         ),
         "run_cutadapt", "Submit cutadapt"),
@@ -2814,7 +2813,7 @@ server <- function(input, output, session) {
     if (!nzchar(adapter1) || !nzchar(adapter2)) {
       run_message("Custom adapter sequences cannot be blank.")
     } else {
-      run_message(submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length, isTRUE(input$cutadapt_use_trimmed_input)))
+      run_message(submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length))
     }
     progress_refresh(Sys.time())
   })
