@@ -872,7 +872,7 @@ read_log_excerpt <- function(path, mode = "tail", n = 120) {
 }
 
 server_browser_choices <- function(path, mode = "dir") {
-  path <- path.expand(trimws(as.character(path %||% "")))
+  path <- path.expand(trimws(as.character(path %||% ""))[1])
   if (!nzchar(path) || !dir.exists(path)) path <- path.expand("~")
   path <- normalizePath(path, winslash = "/", mustWork = FALSE)
   dirs <- list.dirs(path, recursive = FALSE, full.names = TRUE)
@@ -880,27 +880,24 @@ server_browser_choices <- function(path, mode = "dir") {
   dirs <- dirs[!grepl("^\\.", basename(dirs))]
   dirs <- dirs[basename(dirs) != "__pycache__"]
   dirs <- sort(dirs)
-  labels <- paste0(basename(dirs), "/")
-  values <- dirs
+  choices <- stats::setNames(dirs, paste0(basename(dirs), "/"))
   if (identical(mode, "file")) {
     files <- list.files(path, recursive = FALSE, full.names = TRUE)
     files <- files[file.exists(files) & !dir.exists(files)]
     files <- files[!grepl("^\\.", basename(files))]
     files <- files[basename(files) != "__pycache__"]
     files <- sort(files)
-    file_labels <- basename(files)
-    labels <- c(labels, file_labels)
-    values <- c(values, files)
+    file_choices <- stats::setNames(files, basename(files))
+    choices <- c(choices, file_choices)
   }
-  if (!length(values)) {
-    values <- path
-    labels <- "(empty folder)"
+  if (!length(choices)) {
+    choices <- stats::setNames(path, "(empty folder)")
   }
-  stats::setNames(values, labels)
+  choices
 }
 
 browser_start_path <- function(value, mode = "dir") {
-  value <- path.expand(trimws(as.character(value %||% "")))
+  value <- path.expand(trimws(as.character(value %||% ""))[1])
   if (nzchar(value) && identical(mode, "file") && file.exists(value)) return(dirname(value))
   if (nzchar(value) && dir.exists(value)) return(value)
   if (nzchar(value) && dir.exists(dirname(value))) return(dirname(value))
@@ -2600,6 +2597,8 @@ server <- function(input, output, session) {
     msg <- tryCatch({
       cfg <- write_project_config(p)
       projects(discover_projects())
+      write_last_project_id(p$id)
+      updateSelectInput(session, "project_id", selected = p$id)
       paste("Created project:", p$name, "\nSaved project file:", cfg)
     }, error = function(e) paste("ERROR:", conditionMessage(e)))
     output$create_project_status <- renderText(msg)
