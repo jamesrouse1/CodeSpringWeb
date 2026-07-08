@@ -2407,6 +2407,7 @@ write_gsea_r_shell_script <- function(project, runner_script, script_dir, projec
     "fi",
     "echo \"Using Rscript: $(command -v Rscript)\"",
     "Rscript --version || true",
+    "Rscript -e 'cat(\"R library paths:\\n\", paste(.libPaths(), collapse=\"\\n\"), \"\\n\", sep=\"\"); cat(\"fgsea available: \", requireNamespace(\"fgsea\", quietly=TRUE), \"\\n\", sep=\"\"); if (!requireNamespace(\"fgsea\", quietly=TRUE)) stop(\"fgsea is not available to this SLURM job. Re-run run_codespringweb.sh or check R_LIBS_USER.\")'",
     paste(
       "Rscript",
       shQuote(runner_script),
@@ -3429,7 +3430,12 @@ server <- function(input, output, session) {
     run_message(msg)
     if (!startsWith(msg, "ERROR")) {
       tryCatch(
-        mark_submission_active(label, input_mode),
+        {
+          mark_submission_active(label, input_mode)
+          jobs_now <- job_history(current_project())
+          job_history_state(carry_forward_job_elapsed(jobs_now, isolate(job_history_state())))
+          progress_refresh(Sys.time())
+        },
         error = function(e) run_message(paste(msg, "\nProgress display update failed:", conditionMessage(e)))
       )
       finish_submit_refresh()

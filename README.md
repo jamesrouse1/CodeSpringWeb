@@ -112,6 +112,19 @@ Outputs are written under:
 
 The folder name remains `gseapy` for compatibility with the existing CodeSpringLab Results Explorer, but newly submitted jobs use the R/fgsea implementation.
 
+### Troubleshoot A Failed GSEA Job
+
+Check the newest GSEA logs for the selected project:
+
+```bash
+cd ~/csl_results/<project_name>/log
+ls -lhtr *gseapy*.txt
+tail -120 "$(ls -t error_gseapy_*.txt | head -1)"
+tail -120 "$(ls -t output_gseapy_*.txt | head -1)"
+```
+
+The output log prints the R version, R library paths, whether `fgsea` is available to the SLURM job, the gene-label mapping mode, the number of ranked genes, and which gene-set database/cache was used.
+
 ## Port Cleanup
 
 The launcher stops stale listeners on the requested port before starting the app. The app itself also checks for older CodeSpring/R Shiny sessions on startup unless disabled:
