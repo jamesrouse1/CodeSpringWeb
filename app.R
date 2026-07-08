@@ -849,6 +849,102 @@ empty_job_filter_message <- function(jobs, original_jobs, tool) {
   out
 }
 
+run_manifest_path <- function(project) {
+  file.path(dirname(project$data_dir), "log", "codespringweb_run_manifest.tsv")
+}
+
+read_run_manifest <- function(project) {
+  path <- run_manifest_path(project)
+  if (!file.exists(path)) return(data.frame())
+  tryCatch(utils::read.delim(path, check.names = FALSE, stringsAsFactors = FALSE, fill = TRUE), error = function(e) data.frame())
+}
+
+project_methods_summary <- function(project) {
+  res <- genome_resources(project)
+  data.frame(
+    Field = c(
+      "Project",
+      "Analysis",
+      "Species",
+      "Genome/reference version",
+      "Reference key",
+      "Paired-end",
+      "Results root",
+      "Data folder",
+      "Design matrix",
+      "STAR index",
+      "GTF",
+      "RSEM index",
+      "Kallisto index",
+      "RSeQC strand BED"
+    ),
+    Value = c(
+      project$label,
+      project$analysis,
+      genome_species(project),
+      res$label,
+      genome_reference_key(project),
+      as.character(isTRUE(project$paired_end)),
+      project$results_root,
+      project$data_dir,
+      project$design_matrix_path,
+      res$star_index,
+      res$gtf,
+      res$rsem_index,
+      res$kallisto_index,
+      res$strand_bed
+    ),
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+}
+
+methods_sentence_for_step <- function(step, manifest_rows, project) {
+  refs <- if ("reference" %in% names(manifest_rows)) unique(manifest_rows$reference[nzchar(manifest_rows$reference)]) else character(0)
+  modes <- if ("input_mode" %in% names(manifest_rows)) unique(manifest_rows$input_mode[nzchar(manifest_rows$input_mode)]) else character(0)
+  ref_text <- if (length(refs)) paste0(" Reference: ", paste(refs, collapse = "; "), ".") else ""
+  mode_text <- if (length(modes)) paste0(" Inputs/settings: ", paste(modes, collapse = "; "), ".") else ""
+  switch(
+    step,
+    "FastQC" = paste0("Read quality control was performed with FastQC.", mode_text),
+    "Cutadapt" = paste0("Adapter trimming was performed with cutadapt.", mode_text),
+    "STAR" = paste0("Reads were aligned with STAR using ", gencode_label(project), ".", ref_text, mode_text),
+    "featureCounts" = paste0("Gene-level counts were quantified with featureCounts using the selected GTF annotation.", ref_text, mode_text),
+    "DESeq2" = paste0("Differential expression analysis was performed with DESeq2.", mode_text),
+    "GSEA" = paste0("Gene set enrichment analysis was performed with GSEApy.", ref_text, mode_text),
+    "RSEM (optional)" = paste0("Optional transcript/gene quantification was performed with RSEM.", ref_text, mode_text),
+    "Kallisto (optional)" = paste0("Optional transcript abundance quantification was performed with Kallisto.", ref_text, mode_text),
+    paste0(step, " was run.", ref_text, mode_text)
+  )
+}
+
+project_methods_text <- function(project) {
+  manifest <- read_run_manifest(project)
+  status <- project_status(project)
+  completed <- status$step[status$status == "Complete"]
+  run_steps <- if (NROW(manifest) && "step" %in% names(manifest)) unique(as.character(manifest$step)) else character(0)
+  steps <- pipeline_order()[pipeline_order() %in% unique(c(completed, run_steps))]
+  if (!length(steps)) steps <- completed
+  lines <- c(
+    paste0("Project: ", project$label),
+    paste0("Analysis: ", project$analysis),
+    paste0("Reference genome: ", gencode_label(project), " (", genome_reference_key(project), ")."),
+    paste0("Species: ", genome_species(project), "."),
+    paste0("Design matrix: ", project$design_matrix_path),
+    ""
+  )
+  if (length(steps)) {
+    lines <- c(lines, "Methods by completed/submitted step:")
+    for (step in steps) {
+      rows <- if (NROW(manifest) && "step" %in% names(manifest)) manifest[manifest$step == step, , drop = FALSE] else data.frame()
+      lines <- c(lines, paste0("- ", methods_sentence_for_step(step, rows, project)))
+    }
+  } else {
+    lines <- c(lines, "No submitted or completed pipeline steps were detected for this project yet.")
+  }
+  paste(lines, collapse = "\n")
+}
+
 last_job_modes <- function(project) {
   jobs <- job_history(project)
   last_job_modes_from_jobs(jobs)
@@ -2936,7 +3032,18 @@ ui <- fluidPage(
                  br(),
                  verbatimTextOutput("run_output")),
         tabPanel("Results Explorer", uiOutput("native_results_ui")),
-        tabPanel("Logs", br(), h3("Submitted Jobs"), uiOutput("job_filter_ui"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text")))
+        tabPanel("Logs", br(), h3("Submitted Jobs"), uiOutput("job_filter_ui"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text"))),
+        tabPanel("Methods", br(),
+                 h3("Methods Documentation"),
+                 tags$p(class = "muted", "Project-specific methods, parameters, references, and submitted tool records."),
+                 h4("Project and Reference"),
+                 table_output("methods_project_table"),
+                 br(),
+                 h4("Submitted Tool Manifest"),
+                 table_output("methods_manifest_table"),
+                 br(),
+                 h4("Copyable Methods Text"),
+                 tags$pre(class = "log-viewer", textOutput("methods_text")))
       )
     )
   )
@@ -3713,6 +3820,23 @@ server <- function(input, output, session) {
   output$selected_log_text <- renderText({
     req(input$selected_log_file)
     read_log_excerpt(input$selected_log_file, input$log_view_mode %||% "tail")
+  })
+
+  output$methods_project_table <- render_csl_table({
+    project_methods_summary(current_project())
+  }, page_length = 25, scroll_y = "360px")
+
+  output$methods_manifest_table <- render_csl_table({
+    manifest <- read_run_manifest(current_project())
+    if (!NROW(manifest)) {
+      return(data.frame(Message = paste("No CodeSpringWeb run manifest found yet at", run_manifest_path(current_project())), stringsAsFactors = FALSE))
+    }
+    keep <- intersect(c("time", "step", "sample", "job_id", "input_mode", "genome", "reference", "output_target"), names(manifest))
+    manifest[, keep, drop = FALSE]
+  }, page_length = 25, scroll_y = "420px")
+
+  output$methods_text <- renderText({
+    project_methods_text(current_project())
   })
 }
 
