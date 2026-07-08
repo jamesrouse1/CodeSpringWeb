@@ -878,13 +878,15 @@ server_browser_choices <- function(path, mode = "dir") {
   dirs <- list.dirs(path, recursive = FALSE, full.names = TRUE)
   dirs <- dirs[dir.exists(dirs)]
   dirs <- dirs[!grepl("^\\.", basename(dirs))]
-  labels <- paste0("[folder] ", basename(dirs))
+  dirs <- sort(dirs)
+  labels <- paste0(basename(dirs), "/")
   values <- dirs
   if (identical(mode, "file")) {
     files <- list.files(path, recursive = FALSE, full.names = TRUE)
     files <- files[file.exists(files) & !dir.exists(files)]
     files <- files[!grepl("^\\.", basename(files))]
-    file_labels <- paste0("[file] ", basename(files))
+    files <- sort(files)
+    file_labels <- basename(files)
     labels <- c(labels, file_labels)
     values <- c(values, files)
   }
@@ -2168,6 +2170,9 @@ select.form-control {
   flex-wrap:wrap;
   margin:8px 0 10px 0;
 }
+.path-browser-actions .btn {
+  border-radius:6px;
+}
 .path-browser-current {
   background:#f8fafc;
   border:1px solid #d8dde8;
@@ -2176,6 +2181,37 @@ select.form-control {
   font-size:12px;
   overflow-wrap:anywhere;
   margin-bottom:8px;
+}
+.path-browser-modal .form-group {
+  margin-bottom:10px;
+}
+.path-browser-modal #browser_manual_path {
+  font-family:Menlo, Monaco, Consolas, monospace;
+  border-radius:6px;
+  border-color:#cfd7e3;
+  background:#fbfdff;
+}
+.path-browser-modal #browser_choice {
+  min-height:300px;
+  border-radius:8px;
+  border-color:#c7d6e8;
+  background:#fbfdff;
+  font-size:13px;
+}
+.new-project-path-control {
+  background:#f8fafc;
+  border:1px solid #d8dde8;
+  border-radius:8px;
+  padding:10px;
+  margin-bottom:10px;
+}
+.new-project-path-control .form-group {
+  margin-bottom:8px;
+}
+.new-project-path-control .btn {
+  width:100%;
+  text-align:left;
+  border-radius:6px;
 }
 
 "
@@ -2273,14 +2309,16 @@ server <- function(input, output, session) {
     title <- if (identical(mode, "file")) "Choose a server file" else "Choose a server folder"
     showModal(modalDialog(
       title = title,
-      div(class = "path-browser-current", textOutput("browser_current_path_text")),
-      textInput("browser_manual_path", "Jump to folder", value = path_browser$path),
-      div(class = "path-browser-actions",
-          actionButton("browser_go_path", "Go"),
-          actionButton("browser_up", "Up one folder"),
-          actionButton("browser_open_choice", "Open selected")
+      div(class = "path-browser-modal",
+          div(class = "path-browser-current", textOutput("browser_current_path_text")),
+          textInput("browser_manual_path", "Type or paste a server folder", value = path_browser$path),
+          div(class = "path-browser-actions",
+              actionButton("browser_go_path", "Jump to typed path"),
+              actionButton("browser_up", "Up one folder"),
+              actionButton("browser_open_choice", "Open selected")
+          ),
+          uiOutput("browser_choices_ui")
       ),
-      uiOutput("browser_choices_ui"),
       footer = tagList(
         modalButton("Cancel"),
         actionButton("browser_use_current", if (identical(mode, "file")) "Use selected/current" else "Use this folder", class = "btn-primary")
@@ -2301,6 +2339,10 @@ server <- function(input, output, session) {
 
   observeEvent(input$browse_new_fastq_dir, {
     open_server_browser("new_fastq_dir", "dir", input$new_fastq_dir %||% "")
+  })
+
+  observeEvent(input$browse_new_results_root, {
+    open_server_browser("new_results_root", "dir", input$new_results_root %||% "")
   })
 
   observeEvent(input$browse_new_design_matrix_path, {
@@ -2372,11 +2414,18 @@ server <- function(input, output, session) {
       selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = input$analysis, selectize = FALSE),
       selectInput("new_genome", "Genome", choices = c("mouse", "human"), selected = "mouse", selectize = FALSE),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
-      textInput("new_fastq_dir", "Raw FASTQ folder", value = "", placeholder = "Choose with Browse or paste a server path"),
-      actionButton("browse_new_fastq_dir", "Browse server folders", class = "btn-default"),
-      textInput("new_results_root", "Results root", value = "~/csl_results"),
-      textInput("new_design_matrix_path", "Design matrix path", value = "", placeholder = "Optional; defaults to <results>/<project>/data/manifest/design_matrix.txt"),
-      actionButton("browse_new_design_matrix_path", "Browse design matrix", class = "btn-default"),
+      div(class = "new-project-path-control",
+          textInput("new_fastq_dir", "Raw FASTQ folder", value = "", placeholder = "Choose with Browse or paste a server path"),
+          actionButton("browse_new_fastq_dir", "Browse raw FASTQ folder", class = "btn-default")
+      ),
+      div(class = "new-project-path-control",
+          textInput("new_results_root", "Results root", value = "~/csl_results", placeholder = "Where CodeSpringWeb should write project results"),
+          actionButton("browse_new_results_root", "Browse results root", class = "btn-default")
+      ),
+      div(class = "new-project-path-control",
+          textInput("new_design_matrix_path", "Design matrix path", value = "", placeholder = "Optional; defaults to <results>/<project>/data/manifest/design_matrix.txt"),
+          actionButton("browse_new_design_matrix_path", "Browse design matrix", class = "btn-default")
+      ),
       actionButton("create_project_config", "Create project", class = "btn-primary"),
       textOutput("create_project_status")
     )
