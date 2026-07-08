@@ -1023,6 +1023,15 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   modes <- last_job_modes_from_jobs(jobs)
   raw$input <- unname(modes[raw$step])
   raw$input[is.na(raw$input)] <- ""
+  raw$detail <- ""
+  for (step in c("DESeq2", "GSEA")) {
+    complete <- completed_project_level_runs(project, step)
+    running <- running_project_level_runs(jobs, step)
+    pieces <- character(0)
+    if (length(running)) pieces <- c(pieces, paste("Running:", paste(running, collapse = "; ")))
+    if (length(complete)) pieces <- c(pieces, paste("Complete:", paste(complete, collapse = "; ")))
+    raw$detail[raw$step == step] <- paste(pieces, collapse = " | ")
+  }
   if (is.null(progress)) progress <- tryCatch(sample_progress(project, active_states, data.frame(), jobs = jobs)$table, error = function(e) data.frame())
   if (NROW(progress)) {
     for (step in c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
@@ -2197,12 +2206,17 @@ pipeline_stepper_ui <- function(project, status = NULL) {
   if (is.null(status) || !NROW(status)) status <- project_status(project)
   meta <- run_step_meta()
   div(class = "pipeline-stepper", lapply(seq_len(NROW(meta)), function(i) {
-    st <- status$status[match(meta$step[i], status$step)] %||% "Not started"
-    mode <- status$input[match(meta$step[i], status$step)] %||% ""
+    hit <- match(meta$step[i], status$step)
+    st <- status$status[hit] %||% "Not started"
+    mode <- status$input[hit] %||% ""
+    detail <- if ("detail" %in% names(status)) status$detail[hit] %||% "" else ""
     cls <- switch(st, "Complete" = "complete", "Active" = "active", "not-started")
     div(class = paste("pipeline-step", cls),
         div(class = "step-index", meta$order[i]),
-        div(class = "step-main", tags$strong(meta$step[i]), tags$span(status_label(st)), if (nzchar(mode)) tags$em(mode) else NULL)
+        div(class = "step-main",
+            tags$strong(meta$step[i]),
+            tags$span(status_label(st)),
+            if (nzchar(detail)) tags$em(detail) else if (nzchar(mode)) tags$em(mode) else NULL)
     )
   }))
 }
