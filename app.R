@@ -1423,6 +1423,17 @@ parse_sbatch_job_id <- function(output) {
   sub(".*Submitted batch job[[:space:]]+", "", regmatches(output, m))
 }
 
+submit_screen_message <- function(step, sample = "", job_id = "", input_mode = "", dependency_ids = character()) {
+  label <- step
+  if (nzchar(sample %||% "")) label <- paste(label, "-", sample)
+  lines <- paste("Submitted", label)
+  if (nzchar(job_id %||% "")) lines <- c(lines, paste("Job ID:", job_id))
+  deps <- dependency_ids[nzchar(dependency_ids)]
+  if (length(deps)) lines <- c(lines, paste("After jobs:", paste(deps, collapse = ", ")))
+  lines <- c(lines, "Logs are available in the Logs tab.")
+  paste(lines, collapse = "\n")
+}
+
 submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "") {
   log_dir <- file.path(dirname(project$data_dir), "log")
   dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
@@ -1446,7 +1457,7 @@ submit_sbatch <- function(project, step, script, args, log_name, input_mode = ""
   job_id <- parse_sbatch_job_id(out_text)
   manifest <- append_run_manifest(project, step, sample, cmd, target, input_mode, reference, job_id)
   save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n"))
-  paste(c(paste("Command:", paste(cmd, collapse = " ")), out_text, if (nzchar(job_id)) paste("Job ID:", job_id), if (nzchar(sample)) paste("Sample:", sample), if (nzchar(input_mode)) paste("Input mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n")
+  submit_screen_message(step, sample, job_id, input_mode)
 }
 
 submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
@@ -1470,7 +1481,7 @@ submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mod
   job_id <- parse_sbatch_job_id(out_text)
   manifest <- append_run_manifest(project, step, sample, cmd, target, input_mode, reference, job_id)
   save_job(project, step, cmd, paste(c(out_text, if (nzchar(job_id)) paste("job_id:", job_id), if (nzchar(sample)) paste("sample:", sample), if (nzchar(target)) paste("target:", target), if (nzchar(input_mode)) paste("input_mode:", input_mode), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n"))
-  paste(c(paste("Command:", paste(cmd, collapse = " ")), out_text, if (nzchar(job_id)) paste("Job ID:", job_id), if (length(dep)) paste("After:", paste(dep, collapse = ", ")), paste("stdout:", stdout), paste("stderr:", stderr), paste("manifest:", manifest)), collapse = "\n")
+  submit_screen_message(step, sample, job_id, input_mode, dep)
 }
 
 write_featurecounts_matrix_script <- function(project) {
@@ -2424,6 +2435,13 @@ server <- function(input, output, session) {
   sample_progress_state <- reactiveVal(data.frame())
   path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
 
+  refresh_progress_now <- function() {
+    res <- sample_progress(current_project(), active_job_state_map(current_project()), isolate(sample_size_cache()))
+    sample_size_cache(res$cache)
+    sample_progress_state(res$table)
+    progress_refresh(Sys.time())
+  }
+
   open_server_browser <- function(target, mode = "dir", current = "") {
     path_browser$target <- target
     path_browser$mode <- mode
@@ -2743,7 +2761,7 @@ server <- function(input, output, session) {
 
   observe({
     invalidateLater(PROGRESS_REFRESH_MS, session)
-    progress_refresh(Sys.time())
+    refresh_progress_now()
   })
 
   output$progress_updated <- renderText({
@@ -2757,18 +2775,11 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$refresh_progress, {
-    progress_refresh(Sys.time())
+    refresh_progress_now()
   })
 
   output$pipeline_stepper <- renderUI({
     pipeline_stepper_ui(current_project())
-  })
-
-  observe({
-    progress_refresh()
-    res <- sample_progress(current_project(), active_job_state_map(current_project()), isolate(sample_size_cache()))
-    sample_size_cache(res$cache)
-    sample_progress_state(res$table)
   })
 
   output$sample_progress_matrix_ui <- renderUI({
@@ -2853,7 +2864,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$run_fastqc, {
     run_message(submit_fastqc_jobs(current_project(), isTRUE(input$fastqc_use_trimmed)))
-    progress_refresh(Sys.time())
+    refresh_progress_now()
   })
   observeEvent(input$run_cutadapt, {
     adapter1 <- selected_adapter_value(input$cutadapt_adapter1, input$cutadapt_adapter1_custom)
@@ -2863,23 +2874,23 @@ server <- function(input, output, session) {
     } else {
       run_message(submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length))
     }
-    progress_refresh(Sys.time())
+    refresh_progress_now()
   })
   observeEvent(input$run_star, {
     run_message(submit_star_jobs(current_project(), isTRUE(input$star_use_trimmed)))
-    progress_refresh(Sys.time())
+    refresh_progress_now()
   })
   observeEvent(input$run_rsem, {
     run_message(submit_rsem_jobs(current_project(), input$rsem_feature_attr))
-    progress_refresh(Sys.time())
+    refresh_progress_now()
   })
   observeEvent(input$run_kallisto, {
     run_message(submit_kallisto_jobs(current_project(), isTRUE(input$kallisto_use_trimmed)))
-    progress_refresh(Sys.time())
+    refresh_progress_now()
   })
   observeEvent(input$run_featurecounts, {
     run_message(submit_featurecounts_jobs(current_project(), input$feature_attr))
-    progress_refresh(Sys.time())
+    refresh_progress_now()
   })
   observeEvent(input$run_deseq2, {
     if (identical(input$deseq_reference, input$deseq_comparison)) {
@@ -2887,7 +2898,7 @@ server <- function(input, output, session) {
     } else {
       run_message(submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant"))
     }
-    progress_refresh(Sys.time())
+    refresh_progress_now()
   })
   output$run_output <- renderText(run_message())
 
