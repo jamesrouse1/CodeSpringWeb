@@ -1971,7 +1971,7 @@ submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mod
   dep <- dependency_ids[nzchar(dependency_ids)]
   cmd <- c("sbatch", "-J", job_name, "-e", stderr, "-o", stdout)
   if (length(dep)) cmd <- c(cmd, paste0("--dependency=afterok:", paste(dep, collapse = ":")))
-  cmd <- c(cmd, "--wrap", shell_command)
+  cmd <- c(cmd, paste0("--wrap=", shell_command))
   writeLines(c(
     paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
     paste("project:", project$name),
