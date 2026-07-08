@@ -2037,6 +2037,67 @@ write_gseapy_script <- function(project) {
   script
 }
 
+write_gseapy_shell_script <- function(project, python_script, script_dir, project_name, results_root, geneset, genome,
+                                      feature, design_dir, deseq_dir, outpath_pathway, reference, comparison) {
+  log_dir <- file.path(dirname(project$data_dir), "log")
+  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
+  script <- file.path(log_dir, "run_gseapy_pathway.sh")
+  lines <- c(
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "module load EBModules >/dev/null 2>&1 || true",
+    "module load Python/3.7.4-GCCcore-8.3.0 >/dev/null 2>&1 || true",
+    "choose_python() {",
+    "  local candidates=(\"${CSL_PYTHON_BIN:-}\" \"${PYTHON_BIN:-}\" \"/grid/it/modules/bsr/software/Python/3.7.4-GCCcore-8.3.0/bin/python\" \"python3\" \"python\")",
+    "  local py",
+    "  for py in \"${candidates[@]}\"; do",
+    "    [ -n \"$py\" ] || continue",
+    "    if ! command -v \"$py\" >/dev/null 2>&1; then continue; fi",
+    "    if \"$py\" - <<'PY' >/dev/null 2>&1",
+    "import gseapy",
+    "import pandas",
+    "import matplotlib",
+    "PY",
+    "    then",
+    "      command -v \"$py\"",
+    "      return 0",
+    "    fi",
+    "  done",
+    "  return 1",
+    "}",
+    "PYTHON_EXE=$(choose_python || true)",
+    "if [ -z \"${PYTHON_EXE:-}\" ]; then",
+    "  echo 'ERROR: Could not find a Python executable with gseapy, pandas, and matplotlib available.' >&2",
+    "  echo 'Set CSL_PYTHON_BIN or PYTHON_BIN before launching CodeSpringWeb, or install gseapy in the server Python environment.' >&2",
+    "  exit 1",
+    "fi",
+    "echo \"Using Python: $PYTHON_EXE\"",
+    "\"$PYTHON_EXE\" - <<'PY'",
+    "import sys, gseapy, pandas, matplotlib",
+    "print('Python version:', sys.version.replace('\\n', ' '))",
+    "print('gseapy version:', getattr(gseapy, '__version__', 'unknown'))",
+    "PY",
+    paste(
+      "\"$PYTHON_EXE\"",
+      shQuote(python_script),
+      shQuote(script_dir),
+      shQuote(project_name),
+      shQuote(results_root),
+      shQuote(geneset),
+      shQuote(genome),
+      shQuote(feature),
+      shQuote(design_dir),
+      shQuote(deseq_dir),
+      shQuote(outpath_pathway),
+      shQuote(reference),
+      shQuote(comparison)
+    )
+  )
+  writeLines(lines, script)
+  Sys.chmod(script, mode = "0755")
+  script
+}
+
 submit_gseapy_job <- function(project, compare_col, reference, comparison, geneset) {
   geneset <- trimws(geneset %||% "")
   if (!nzchar(geneset)) stop("Choose a GSEA gene-set database.")
@@ -2049,26 +2110,24 @@ submit_gseapy_job <- function(project, compare_col, reference, comparison, genes
   dir.create(outpath_pathway, recursive = TRUE, showWarnings = FALSE)
   design_matrix <- deseq_design_for_column(project, compare_col)
   design_dir <- dirname(design_matrix)
-  script <- write_gseapy_script(project)
-  python_bin <- Sys.getenv("CSL_PYTHON_BIN", unset = Sys.getenv("PYTHON_BIN", unset = ""))
-  if (!nzchar(python_bin)) python_bin <- Sys.which("python3") %||% "python3"
-  if (!nzchar(python_bin)) python_bin <- "python3"
+  python_script <- write_gseapy_script(project)
   results_root <- project$results_root %||% dirname(dirname(project$data_dir))
-  cmd <- paste(
-    shQuote(python_bin),
-    shQuote(script),
-    shQuote(SCRIPTS_DIR),
-    shQuote(project$name),
-    shQuote(results_root),
-    shQuote(geneset),
-    shQuote(genome_species(project)),
-    shQuote("auto"),
-    shQuote(design_dir),
-    shQuote(deseq_dir),
-    shQuote(outpath_pathway),
-    shQuote(reference),
-    shQuote(comparison)
+  shell_script <- write_gseapy_shell_script(
+    project = project,
+    python_script = python_script,
+    script_dir = SCRIPTS_DIR,
+    project_name = project$name,
+    results_root = results_root,
+    geneset = geneset,
+    genome = genome_species(project),
+    feature = "auto",
+    design_dir = design_dir,
+    deseq_dir = deseq_dir,
+    outpath_pathway = outpath_pathway,
+    reference = reference,
+    comparison = comparison
   )
+  cmd <- paste("bash", shQuote(shell_script))
   target <- file.path(outpath_pathway, "gseapy.gene_set.gsea.report.csv")
   submit_sbatch_wrap(project, "GSEA", cmd, "gseapy", paste(compare_col, comparison, "vs", reference, geneset), target = target, reference = geneset)
 }
