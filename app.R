@@ -1137,6 +1137,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   sample_steps <- c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")
   if (is.null(jobs)) jobs <- job_history(project)
   active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
+  completed_job_states <- c("COMPLETED", "COMPLETED+", "CD", "Finished or not in queue")
   active_jobs <- if (NROW(jobs) && "slurm_state" %in% names(jobs)) jobs[jobs$slurm_state %in% active_job_states, , drop = FALSE] else data.frame()
   rows <- list()
   cache_rows <- list()
@@ -1156,15 +1157,24 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         } else step_hits
       } else data.frame()
       active <- NROW(active_hit) > 0 || step %in% names(active_states)
-      slurm_state <- if (NROW(active_hit)) tail(active_hit$slurm_state, 1) else if (active && step %in% names(active_states)) active_states[[step]] else ""
-      elapsed <- if (NROW(active_hit) && "elapsed" %in% names(active_hit)) tail(active_hit$elapsed, 1) else ""
+      all_step_hits <- if (NROW(jobs)) {
+        step_hits <- jobs[jobs$step == step, , drop = FALSE]
+        if ("sample" %in% names(step_hits) && NROW(step_hits)) {
+          sample_hits <- step_hits[nzchar(step_hits$sample) & step_hits$sample == sample, , drop = FALSE]
+          if (NROW(sample_hits)) sample_hits else step_hits
+        } else step_hits
+      } else data.frame()
+      latest_hit <- if (NROW(active_hit)) tail(active_hit, 1) else if (NROW(all_step_hits)) tail(all_step_hits, 1) else data.frame()
+      slurm_state <- if (NROW(latest_hit) && "slurm_state" %in% names(latest_hit)) latest_hit$slurm_state[1] else if (active && step %in% names(active_states)) active_states[[step]] else ""
+      elapsed <- if (NROW(latest_hit) && "elapsed" %in% names(latest_hit)) latest_hit$elapsed[1] else ""
       min_size <- minimum_expected_bytes(step)
       complete_outputs <- length(sizes) > 0 && all(sizes >= min_size)
       growing <- active && has_previous && size > previous_size
       optional <- step %in% c("RSEM optional", "Kallisto optional")
       slurm_running <- active && slurm_state %in% c("RUNNING", "COMPLETING")
       slurm_waiting <- active && slurm_state %in% c("PENDING", "CONFIGURING", "Submitted")
-      status <- if (complete_outputs && !growing && !slurm_running) {
+      slurm_complete <- slurm_state %in% completed_job_states
+      status <- if ((complete_outputs || (slurm_complete && size > 0)) && !growing && !slurm_running) {
         "Completed"
       } else if (slurm_running) {
         "Running"
@@ -1590,6 +1600,37 @@ write_featurecounts_matrix_script <- function(project) {
   )
   writeLines(lines, script)
   script
+}
+
+build_featurecounts_matrix_now <- function(project) {
+  feature_dir <- file.path(project$data_dir, "featurecounts")
+  counts_dir <- file.path(project$data_dir, "counts")
+  dir.create(counts_dir, recursive = TRUE, showWarnings = FALSE)
+  files <- list.files(feature_dir, pattern = "_counts\\.txt$", recursive = TRUE, full.names = TRUE)
+  if (!length(files)) stop("No featureCounts *_counts.txt files found in ", feature_dir)
+  read_one <- function(path) {
+    x <- utils::read.table(path, sep = "\t", header = TRUE, quote = "\"", comment.char = "#", check.names = FALSE)
+    if (!NROW(x)) return(NULL)
+    gene_col <- intersect(c("Geneid", "gene_id", "gene_name", "GeneID"), names(x))[1]
+    if (is.na(gene_col)) gene_col <- names(x)[1]
+    count_col <- tail(names(x), 1)
+    sample <- sub("_counts\\.txt$", "", basename(path))
+    data.frame(gene = x[[gene_col]], value = suppressWarnings(as.numeric(x[[count_col]])), sample = sample, stringsAsFactors = FALSE)
+  }
+  parts <- Filter(Negate(is.null), lapply(files, read_one))
+  if (!length(parts)) stop("featureCounts files were empty or unreadable.")
+  samples <- vapply(parts, function(x) unique(x$sample)[1], character(1))
+  mat <- Reduce(function(a, b) merge(a, b, by = "gene", all = TRUE), lapply(parts, function(x) {
+    out <- x[, c("gene", "value")]
+    names(out)[2] <- unique(x$sample)[1]
+    out
+  }))
+  mat[is.na(mat)] <- 0
+  names(mat)[1] <- "Geneid"
+  utils::write.table(mat, file = file.path(counts_dir, "count_matrix.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
+  summary <- data.frame(sample = samples, total_counts = vapply(parts, function(x) sum(x$value, na.rm = TRUE), numeric(1)), stringsAsFactors = FALSE)
+  utils::write.table(summary, file = file.path(counts_dir, "featurecounts_summary.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
+  file.path(counts_dir, "count_matrix.txt")
 }
 
 write_quant_matrix_script <- function(project, tool = c("rsem", "kallisto")) {
@@ -2539,21 +2580,41 @@ server <- function(input, output, session) {
   sample_progress_state <- reactiveVal(data.frame())
   path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
 
+  carry_forward_job_elapsed <- function(jobs, previous_jobs) {
+    if (!NROW(jobs) || !NROW(previous_jobs) || !"job_id" %in% names(jobs) || !"job_id" %in% names(previous_jobs)) return(jobs)
+    if (!"elapsed" %in% names(jobs) || !"elapsed" %in% names(previous_jobs)) return(jobs)
+    previous <- previous_jobs[nzchar(previous_jobs$job_id) & nzchar(previous_jobs$elapsed), c("job_id", "elapsed"), drop = FALSE]
+    if (!NROW(previous)) return(jobs)
+    previous <- previous[!duplicated(previous$job_id, fromLast = TRUE), , drop = FALSE]
+    hit <- match(jobs$job_id, previous$job_id)
+    elapsed <- as.character(jobs$elapsed)
+    fill <- !is.na(hit) & !nzchar(elapsed)
+    jobs$elapsed[fill] <- previous$elapsed[hit[fill]]
+    jobs
+  }
+
   refresh_progress_now <- function() {
     p <- current_project()
-    jobs <- job_history(p)
+    jobs <- carry_forward_job_elapsed(job_history(p), isolate(job_history_state()))
     matrix_path <- file.path(p$data_dir, "counts", "count_matrix.txt")
     autosubmitted <- featurecounts_matrix_autosubmitted()
     if (
       identical(p$analysis_key, "rna") &&
       !file.exists(matrix_path) &&
       featurecounts_outputs_ready(p) &&
-      !featurecounts_matrix_job_active(jobs, matrix_path) &&
-      !p$id %in% autosubmitted
+      !featurecounts_matrix_job_active(jobs, matrix_path)
     ) {
-      submit_featurecounts_matrix_job(p, "gene_id")
-      featurecounts_matrix_autosubmitted(unique(c(autosubmitted, p$id)))
-      jobs <- job_history(p)
+      built <- tryCatch({
+        build_featurecounts_matrix_now(p)
+        TRUE
+      }, error = function(e) {
+        FALSE
+      })
+      if (!built && !p$id %in% autosubmitted) {
+        submit_featurecounts_matrix_job(p, "gene_id")
+        featurecounts_matrix_autosubmitted(unique(c(autosubmitted, p$id)))
+        jobs <- job_history(p)
+      }
     }
     active_states <- active_job_state_map_from_jobs(jobs)
     res <- sample_progress(p, active_states, isolate(sample_size_cache()), jobs = jobs)
@@ -2563,6 +2624,21 @@ server <- function(input, output, session) {
     sample_progress_state(res$table)
     project_status_state(status)
     progress_refresh(Sys.time())
+  }
+
+  finish_submit_refresh <- function() {
+    refresh_progress_now()
+    session$onFlushed(function() {
+      refresh_progress_now()
+    }, once = TRUE)
+  }
+
+  run_submission <- function(label, expr) {
+    run_message(paste("Submitting", label, "..."))
+    progress_refresh(Sys.time())
+    msg <- tryCatch(force(expr), error = function(e) paste("ERROR submitting", label, ":", conditionMessage(e)))
+    run_message(msg)
+    finish_submit_refresh()
   }
 
   open_server_browser <- function(target, mode = "dir", current = "") {
@@ -3032,43 +3108,38 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$run_fastqc, {
-    run_message(submit_fastqc_jobs(current_project(), isTRUE(input$fastqc_use_trimmed)))
-    refresh_progress_now()
+    run_submission("FastQC", submit_fastqc_jobs(current_project(), isTRUE(input$fastqc_use_trimmed)))
   })
   observeEvent(input$run_cutadapt, {
     adapter1 <- selected_adapter_value(input$cutadapt_adapter1, input$cutadapt_adapter1_custom)
     adapter2 <- selected_adapter_value(input$cutadapt_adapter2, input$cutadapt_adapter2_custom)
     if (!nzchar(adapter1) || !nzchar(adapter2)) {
       run_message("Custom adapter sequences cannot be blank.")
+      finish_submit_refresh()
     } else {
-      run_message(submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length))
+      run_submission("Cutadapt", submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length))
     }
-    refresh_progress_now()
   })
   observeEvent(input$run_star, {
-    run_message(submit_star_jobs(current_project(), isTRUE(input$star_use_trimmed)))
-    refresh_progress_now()
+    run_submission("STAR", submit_star_jobs(current_project(), isTRUE(input$star_use_trimmed)))
   })
   observeEvent(input$run_rsem, {
-    run_message(submit_rsem_jobs(current_project(), input$rsem_feature_attr))
-    refresh_progress_now()
+    run_submission("RSEM", submit_rsem_jobs(current_project(), input$rsem_feature_attr))
   })
   observeEvent(input$run_kallisto, {
-    run_message(submit_kallisto_jobs(current_project(), isTRUE(input$kallisto_use_trimmed)))
-    refresh_progress_now()
+    run_submission("Kallisto", submit_kallisto_jobs(current_project(), isTRUE(input$kallisto_use_trimmed)))
   })
   observeEvent(input$run_featurecounts, {
     featurecounts_matrix_autosubmitted(setdiff(featurecounts_matrix_autosubmitted(), current_project()$id))
-    run_message(submit_featurecounts_jobs(current_project(), input$feature_attr))
-    refresh_progress_now()
+    run_submission("featureCounts", submit_featurecounts_jobs(current_project(), input$feature_attr))
   })
   observeEvent(input$run_deseq2, {
     if (identical(input$deseq_reference, input$deseq_comparison)) {
       run_message("Reference and comparison must be different.")
+      finish_submit_refresh()
     } else {
-      run_message(submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant"))
+      run_submission("DESeq2", submit_deseq2_job(current_project(), input$deseq_compare_col, input$deseq_reference, input$deseq_comparison, "NoRedundant"))
     }
-    refresh_progress_now()
   })
   output$run_output <- renderText(run_message())
 
