@@ -1967,11 +1967,18 @@ submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mod
   stdout <- file.path(log_dir, paste0("output_", log_name, "_", stamp, ".txt"))
   stderr <- file.path(log_dir, paste0("error_", log_name, "_", stamp, ".txt"))
   submit_log <- file.path(log_dir, paste0("submit_", log_name, "_", stamp, ".txt"))
+  wrap_script <- file.path(log_dir, paste0("sbatch_", log_name, "_", stamp, ".sh"))
   job_name <- job_name_for(project, step, sample)
   dep <- dependency_ids[nzchar(dependency_ids)]
   cmd <- c("sbatch", "-J", job_name, "-e", stderr, "-o", stdout)
   if (length(dep)) cmd <- c(cmd, paste0("--dependency=afterok:", paste(dep, collapse = ":")))
-  cmd <- c(cmd, paste0("--wrap=", shell_command))
+  writeLines(c(
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    shell_command
+  ), wrap_script)
+  Sys.chmod(wrap_script, mode = "0755")
+  cmd <- c(cmd, wrap_script)
   writeLines(c(
     paste("time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
     paste("project:", project$name),
@@ -1981,6 +1988,7 @@ submit_sbatch_wrap <- function(project, step, shell_command, log_name, input_mod
     paste("dependencies:", paste(dep, collapse = ",")),
     paste("stdout:", stdout),
     paste("stderr:", stderr),
+    paste("sbatch_script:", wrap_script),
     paste("wrapped_command:", shell_command),
     paste("command:", paste(shQuote(cmd), collapse = " "))
   ), submit_log)
