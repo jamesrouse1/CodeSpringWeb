@@ -717,6 +717,8 @@ job_history <- function(project) {
   }
   if (!NROW(jobs)) return(data.frame())
   jobs$step[jobs$step == "Count matrix"] <- "featureCounts"
+  jobs$step[jobs$step == "RSEM optional"] <- "RSEM (optional)"
+  jobs$step[jobs$step == "Kallisto optional"] <- "Kallisto (optional)"
   jobs$job_id <- vapply(as.character(jobs$output), extract_job_id, character(1))
   jobs$slurm_state <- ifelse(nzchar(jobs$job_id), "Submitted", "No job id")
   jobs$elapsed <- ""
@@ -971,28 +973,28 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   feature_count_files <- count_files(file.path(data_dir, "featurecounts"), "_counts\\.txt$")
   feature_matrix_exists <- file.exists(file.path(data_dir, "counts", "count_matrix.txt"))
   raw <- data.frame(
-    step = c("Design matrix", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "DESeq2", "GSEA"),
+    step = c("Design matrix", "FastQC", "Cutadapt", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM (optional)", "Kallisto (optional)"),
     status = c(
       if (file.exists(design)) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
       if (count_files(file.path(data_dir, "star"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not started",
-      if (count_files(file.path(data_dir, "rsem"), "\\.genes\\.results$") > 0) "Complete" else "Not started",
-      if (count_files(file.path(data_dir, "kallisto"), "abundance\\.tsv$") > 0) "Complete" else "Not started",
       if (feature_matrix_exists) "Complete" else if (feature_count_files > 0) "Active" else "Not started",
       if (count_files(file.path(data_dir, "deseq2"), "DEG|normalized") > 0) "Complete" else "Not started",
-      if (count_files(file.path(data_dir, "gseapy"), "\\.(csv|txt|png|pdf)$") > 0) "Complete" else "Not started"
+      if (count_files(file.path(data_dir, "gseapy"), "\\.(csv|txt|png|pdf)$") > 0) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "rsem"), "\\.genes\\.results$") > 0) "Complete" else "Not started",
+      if (count_files(file.path(data_dir, "kallisto"), "abundance\\.tsv$") > 0) "Complete" else "Not started"
     ),
     path = c(
       design,
       file.path(data_dir, "fastqc"),
       file.path(data_dir, "cutadapt"),
       file.path(data_dir, "star"),
-      file.path(data_dir, "rsem"),
-      file.path(data_dir, "kallisto"),
       file.path(data_dir, "counts", "count_matrix.txt"),
       file.path(data_dir, "deseq2"),
-      file.path(data_dir, "gseapy")
+      file.path(data_dir, "gseapy"),
+      file.path(data_dir, "rsem"),
+      file.path(data_dir, "kallisto")
     ),
     stringsAsFactors = FALSE
   )
@@ -1001,7 +1003,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   raw$input[is.na(raw$input)] <- ""
   if (is.null(progress)) progress <- tryCatch(sample_progress(project, active_states, data.frame(), jobs = jobs)$table, error = function(e) data.frame())
   if (NROW(progress)) {
-    for (step in c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")) {
+    for (step in c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
       hit <- progress[progress$step == step, , drop = FALSE]
       if (!NROW(hit)) next
       if (all(hit$status %in% c("Completed", "Optional, not run")) && any(hit$status == "Completed")) {
@@ -1027,7 +1029,7 @@ status_rank <- function(status) {
 }
 
 pipeline_order <- function() {
-  c("Design matrix", "FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts", "DESeq2", "GSEA")
+  c("Design matrix", "FastQC", "Cutadapt", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM (optional)", "Kallisto (optional)")
 }
 
 step_order <- function(step) {
@@ -1099,8 +1101,8 @@ sample_step_targets <- function(project, sample, step) {
       if (length(expected)) expected else file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
     },
     "STAR" = file.path(data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam")),
-    "RSEM optional" = file.path(data_dir, "rsem", sample, paste0(sample, ".genes.results")),
-    "Kallisto optional" = file.path(data_dir, "kallisto", sample, "abundance.tsv"),
+    "RSEM (optional)" = file.path(data_dir, "rsem", sample, paste0(sample, ".genes.results")),
+    "Kallisto (optional)" = file.path(data_dir, "kallisto", sample, "abundance.tsv"),
     "featureCounts" = file.path(data_dir, "featurecounts", sample, paste0(sample, "_counts.txt")),
     character(0)
   )
@@ -1111,8 +1113,8 @@ minimum_expected_bytes <- function(step) {
     "FastQC" = 1000,
     "Cutadapt" = 100,
     "STAR" = 1000,
-    "RSEM optional" = 100,
-    "Kallisto optional" = 100,
+    "RSEM (optional)" = 100,
+    "Kallisto (optional)" = 100,
     "featureCounts" = 100,
     1
   )
@@ -1134,7 +1136,7 @@ previous_size_for <- function(cache, path) {
 sample_progress <- function(project, active_states = active_job_state_map(project), previous_cache = data.frame(), jobs = NULL) {
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
-  sample_steps <- c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")
+  sample_steps <- c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
   if (is.null(jobs)) jobs <- job_history(project)
   active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
   completed_job_states <- c("COMPLETED", "COMPLETED+", "CD", "Finished or not in queue")
@@ -1170,7 +1172,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       min_size <- minimum_expected_bytes(step)
       complete_outputs <- length(sizes) > 0 && all(sizes >= min_size)
       growing <- active && has_previous && size > previous_size
-      optional <- step %in% c("RSEM optional", "Kallisto optional")
+      optional <- step %in% c("RSEM (optional)", "Kallisto (optional)")
       slurm_running <- active && slurm_state %in% c("RUNNING", "COMPLETING")
       slurm_waiting <- active && slurm_state %in% c("PENDING", "CONFIGURING", "Submitted")
       slurm_complete <- slurm_state %in% completed_job_states
@@ -1238,7 +1240,7 @@ status_class <- function(status) {
 
 sample_progress_matrix_ui <- function(progress_df) {
   if (!NROW(progress_df)) return(div(class = "empty-box", "No sample progress available yet."))
-  steps <- c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")
+  steps <- c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
   samples <- unique(progress_df$sample)
   if (length(samples) > SAMPLE_PROGRESS_NICE_LIMIT) {
     return(div(
@@ -1780,12 +1782,12 @@ submit_kallisto_jobs <- function(project, trimmed = FALSE) {
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     input_mode <- if (trimmed) "trimmed reads" else "raw reads"
     target <- file.path(sample_dir, "abundance.tsv")
-    submit_sbatch(project, "Kallisto optional", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto", input_mode, sample = row[["sample"]], target = target, reference = res$kallisto_index)
+    submit_sbatch(project, "Kallisto (optional)", script, c(sample_dir, res$kallisto_index, row[["r1"]], row[["r2"]], project$name), "kallisto", input_mode, sample = row[["sample"]], target = target, reference = res$kallisto_index)
   })
   ids <- vapply(messages, parse_sbatch_job_id, character(1))
   matrix_script <- write_quant_matrix_script(project, "kallisto")
   matrix_cmd <- paste(shQuote(Sys.which("Rscript") %||% "Rscript"), shQuote(matrix_script), shQuote(outdir), shQuote(counts_dir))
-  matrix_msg <- submit_sbatch_wrap(project, "Kallisto optional", matrix_cmd, "kallisto_matrices", "Kallisto matrix build", target = file.path(counts_dir, "kallisto_tpm_matrix.txt"), reference = res$kallisto_index, dependency_ids = ids)
+  matrix_msg <- submit_sbatch_wrap(project, "Kallisto (optional)", matrix_cmd, "kallisto_matrices", "Kallisto matrix build", target = file.path(counts_dir, "kallisto_tpm_matrix.txt"), reference = res$kallisto_index, dependency_ids = ids)
   paste(c(messages, matrix_msg), collapse = "\n")
 }
 
@@ -1805,12 +1807,12 @@ submit_rsem_jobs <- function(project, feature = "gene_id") {
     bam_transcript <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.toTranscriptome.out.bam"))
     count_prefix <- file.path(sample_dir, sample)
     target <- paste0(count_prefix, ".genes.results")
-    submit_sbatch(project, "RSEM optional", script, c(bam, res$rsem_index, feature, count_prefix, res$strand_bed, bam_transcript, project$name), "rsem", paste("STAR BAM; feature", feature), sample = sample, target = target, reference = res$rsem_index)
+    submit_sbatch(project, "RSEM (optional)", script, c(bam, res$rsem_index, feature, count_prefix, res$strand_bed, bam_transcript, project$name), "rsem", paste("STAR BAM; feature", feature), sample = sample, target = target, reference = res$rsem_index)
   }, character(1))
   ids <- vapply(messages, parse_sbatch_job_id, character(1))
   matrix_script <- write_quant_matrix_script(project, "rsem")
   matrix_cmd <- paste(shQuote(Sys.which("Rscript") %||% "Rscript"), shQuote(matrix_script), shQuote(outdir), shQuote(counts_dir))
-  matrix_msg <- submit_sbatch_wrap(project, "RSEM optional", matrix_cmd, "rsem_matrices", paste("RSEM matrix build; feature", feature), target = file.path(counts_dir, "rsem_tpm_matrix.txt"), reference = res$rsem_index, dependency_ids = ids)
+  matrix_msg <- submit_sbatch_wrap(project, "RSEM (optional)", matrix_cmd, "rsem_matrices", paste("RSEM matrix build; feature", feature), target = file.path(counts_dir, "rsem_tpm_matrix.txt"), reference = res$rsem_index, dependency_ids = ids)
   paste(c(messages, matrix_msg), collapse = "\n")
 }
 
@@ -1925,11 +1927,11 @@ run_step_meta <- function() {
       "Generate per-read quality reports.",
       "Trim adapters and short reads.",
       "Align reads and write BAM files.",
-      "Optional RSEM transcript/gene quantification.",
-      "Optional Kallisto transcript quantification.",
       "Create gene-level count files and count_matrix.txt.",
       "Run differential expression and normalized counts.",
-      "Run pathway analysis."
+      "Run pathway analysis.",
+      "Optional RSEM quantification from STAR BAM/transcriptome outputs.",
+      "Optional Kallisto transcript quantification from raw or trimmed reads."
     ),
     stringsAsFactors = FALSE
   )
@@ -3067,22 +3069,22 @@ server <- function(input, output, session) {
       tool_panel("STAR", status, "Align raw or trimmed reads to the selected genome index.",
         tagList(checkboxInput("star_use_trimmed", "Use trimmed reads", value = TRUE)),
         "run_star", "Submit STAR", progress_df),
-      tool_panel("RSEM optional", status, "Optional transcript/gene quantification from STAR BAM and transcriptome BAM outputs.",
-        tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
-        "run_rsem", "Submit RSEM", progress_df),
-      tool_panel("Kallisto optional", status, "Optional transcript abundance quantification from raw or trimmed reads.",
-        tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = TRUE)),
-        "run_kallisto", "Submit Kallisto", progress_df),
       tool_panel("featureCounts", status, "Quantify STAR BAM files with the selected GTF attribute.",
         tagList(selectInput("feature_attr", "featureCounts attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
         "run_featurecounts", "Submit featureCounts", progress_df),
       tool_panel("DESeq2", status, "Run differential expression from count_matrix.txt.",
         uiOutput("deseq_controls_ui"),
-        "run_deseq2", "Submit DESeq2", progress_df)
+        "run_deseq2", "Submit DESeq2", progress_df),
+      tool_panel("RSEM (optional)", status, "Optional quantification from STAR BAM/transcriptome outputs.",
+        tagList(selectInput("rsem_feature_attr", "RSEM feature attribute", choices = c("gene_id", "gene_name"), selected = "gene_id", selectize = FALSE)),
+        "run_rsem", "Submit RSEM", progress_df),
+      tool_panel("Kallisto (optional)", status, "Optional transcript abundance quantification from raw or trimmed reads.",
+        tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = TRUE)),
+        "run_kallisto", "Submit Kallisto", progress_df)
     )
   })
 
-  for (step in c("FastQC", "Cutadapt", "STAR", "RSEM optional", "Kallisto optional", "featureCounts")) {
+  for (step in c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
     local({
       this_step <- step
       output[[tool_progress_output_id(this_step)]] <- render_csl_table({
