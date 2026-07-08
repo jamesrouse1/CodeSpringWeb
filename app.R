@@ -1131,6 +1131,11 @@ log_label_from_path <- function(path, fallback = "Log") {
 
 log_file_choices <- function(project, tool = "All", log_type = "All") {
   vals <- character(0)
+  normalize_log_tool <- function(x) {
+    x <- tolower(trimws(as.character(x %||% "")))
+    x <- gsub("\\(optional\\)", "", x)
+    gsub("[^a-z0-9]+", "", x)
+  }
   add_log_choice <- function(label, path) {
     path <- as.character(path %||% "")
     path <- path[!is.na(path) & nzchar(path)]
@@ -1164,7 +1169,8 @@ log_file_choices <- function(project, tool = "All", log_type = "All") {
   vals <- vals[keep]
   vals <- vals[!duplicated(vals)]
   if (length(vals) && !identical(tool %||% "All", "All")) {
-    vals <- vals[startsWith(names(vals), paste0(tool, " "))]
+    label_tools <- sub("\\s+(output|error).*$", "", names(vals), ignore.case = TRUE)
+    vals <- vals[normalize_log_tool(label_tools) == normalize_log_tool(tool)]
   }
   if (length(vals) && !identical(log_type %||% "All", "All")) {
     vals <- vals[grepl(paste0("\\b", log_type, "\\b"), names(vals), ignore.case = TRUE)]
@@ -3824,7 +3830,7 @@ server <- function(input, output, session) {
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
     all_jobs <- job_history_progress_display(current_project())
-    tool <- progress_job_filter_state()
+    tool <- input$progress_job_tool_filter %||% progress_job_filter_state() %||% "All"
     jobs <- filter_jobs_by_tool(all_jobs, tool)
     prepare_job_table_for_display(empty_job_filter_message(jobs, all_jobs, tool))
   }, page_length = 10, escape = FALSE)
@@ -3837,7 +3843,6 @@ server <- function(input, output, session) {
     if (!selected %in% choices) selected <- "All"
     div(class = "button-row",
         div(style = "min-width:260px; flex:1;", selectInput("progress_job_tool_filter", "Filter submitted jobs by tool", choices = choices, selected = selected, selectize = FALSE)),
-        div(style = "padding-top:25px;", actionButton("apply_progress_job_filter", "Apply filter", class = "btn-primary")),
         div(style = "padding-top:25px;", actionButton("clear_progress_job_filter", "Clear", class = "btn-default"))
     )
   })
@@ -3846,12 +3851,6 @@ server <- function(input, output, session) {
     progress_job_filter_state(input$progress_job_tool_filter %||% "All")
     progress_refresh(Sys.time())
   }, ignoreInit = TRUE)
-
-  observeEvent(input$apply_progress_job_filter, {
-    progress_job_filter_state(input$progress_job_tool_filter %||% "All")
-    safe_refresh_progress_now("job filter")
-    progress_refresh(Sys.time())
-  })
 
   observeEvent(input$clear_progress_job_filter, {
     progress_job_filter_state("All")
@@ -4078,7 +4077,7 @@ server <- function(input, output, session) {
   output$jobs_table <- render_csl_table({
     progress_refresh()
     all_jobs <- job_history_display(current_project())
-    tool <- job_filter_state()
+    tool <- input$job_tool_filter %||% job_filter_state() %||% "All"
     jobs <- filter_jobs_by_tool(all_jobs, tool)
     prepare_job_table_for_display(empty_job_filter_message(jobs, all_jobs, tool))
   }, page_length = 50, escape = FALSE)
@@ -4091,7 +4090,6 @@ server <- function(input, output, session) {
     if (!selected %in% choices) selected <- "All"
     div(class = "button-row",
         div(style = "min-width:260px; flex:1;", selectInput("job_tool_filter", "Filter jobs by tool", choices = choices, selected = selected, selectize = FALSE)),
-        div(style = "padding-top:25px;", actionButton("apply_job_filter", "Apply filter", class = "btn-primary")),
         div(style = "padding-top:25px;", actionButton("clear_job_filter", "Clear", class = "btn-default"))
     )
   })
@@ -4100,11 +4098,6 @@ server <- function(input, output, session) {
     job_filter_state(input$job_tool_filter %||% "All")
     progress_refresh(Sys.time())
   }, ignoreInit = TRUE)
-
-  observeEvent(input$apply_job_filter, {
-    job_filter_state(input$job_tool_filter %||% "All")
-    progress_refresh(Sys.time())
-  })
 
   observeEvent(input$clear_job_filter, {
     job_filter_state("All")
