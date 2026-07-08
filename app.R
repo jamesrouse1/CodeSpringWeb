@@ -823,6 +823,32 @@ job_history_progress_display_from_jobs <- function(jobs) {
   jobs[, keep, drop = FALSE]
 }
 
+job_filter_choices_from_jobs <- function(jobs) {
+  steps <- if (NROW(jobs) && "step" %in% names(jobs)) unique(as.character(jobs$step)) else character(0)
+  steps <- steps[!is.na(steps) & nzchar(steps)]
+  ordered <- pipeline_order()[pipeline_order() %in% steps]
+  extra <- sort(setdiff(steps, ordered))
+  c("All", ordered, extra)
+}
+
+filter_jobs_by_tool <- function(jobs, tool) {
+  tool <- trimws(as.character(tool %||% "All"))
+  if (!NROW(jobs) || identical(tool, "All") || !nzchar(tool) || !"step" %in% names(jobs)) return(jobs)
+  step_norm <- tolower(trimws(as.character(jobs$step)))
+  tool_norm <- tolower(tool)
+  jobs[step_norm == tool_norm, , drop = FALSE]
+}
+
+empty_job_filter_message <- function(jobs, original_jobs, tool) {
+  tool <- trimws(as.character(tool %||% "All"))
+  if (NROW(jobs) || identical(tool, "All") || !NROW(original_jobs)) return(jobs)
+  cols <- names(original_jobs)
+  if (!length(cols)) cols <- c("message")
+  out <- as.data.frame(setNames(replicate(length(cols), "", simplify = FALSE), cols), stringsAsFactors = FALSE)
+  out[[cols[[1]]]] <- paste("No submitted jobs found for", tool, "in this project.")
+  out
+}
+
 last_job_modes <- function(project) {
   jobs <- job_history(project)
   last_job_modes_from_jobs(jobs)
@@ -3395,20 +3421,20 @@ server <- function(input, output, session) {
 
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
-    jobs <- job_history_progress_display_from_jobs(job_history_state())
-    tool <- progress_job_filter_state()
-    if (NROW(jobs) && !identical(tool, "All") && "step" %in% names(jobs)) jobs <- jobs[jobs$step == tool, , drop = FALSE]
-    jobs
+    all_jobs <- job_history_progress_display_from_jobs(job_history_state())
+    tool <- input$progress_job_tool_filter %||% "All"
+    jobs <- filter_jobs_by_tool(all_jobs, tool)
+    empty_job_filter_message(jobs, all_jobs, tool)
   }, page_length = 10)
 
   output$progress_job_filter_ui <- renderUI({
     progress_refresh()
     jobs <- job_history_progress_display_from_jobs(job_history_state())
-    steps <- if (NROW(jobs) && "step" %in% names(jobs)) sort(unique(jobs$step)) else pipeline_order()
-    selected <- progress_job_filter_state()
-    if (!selected %in% c("All", steps)) selected <- "All"
+    choices <- job_filter_choices_from_jobs(jobs)
+    selected <- isolate(input$progress_job_tool_filter %||% progress_job_filter_state())
+    if (!selected %in% choices) selected <- "All"
     div(class = "button-row",
-        div(style = "min-width:260px; flex:1;", selectInput("progress_job_tool_filter", "Filter submitted jobs by tool", choices = c("All", steps), selected = selected, selectize = FALSE)),
+        div(style = "min-width:260px; flex:1;", selectInput("progress_job_tool_filter", "Filter submitted jobs by tool", choices = choices, selected = selected, selectize = FALSE)),
         div(style = "padding-top:25px;", actionButton("apply_progress_job_filter", "Apply filter", class = "btn-primary")),
         div(style = "padding-top:25px;", actionButton("clear_progress_job_filter", "Clear", class = "btn-default"))
     )
@@ -3649,16 +3675,18 @@ server <- function(input, output, session) {
   output$all_file_view <- renderUI({ req(input$all_file); image_or_file_ui(input$all_file) })
   output$jobs_table <- render_csl_table({
     progress_refresh()
-    jobs <- job_history_display(current_project())
+    all_jobs <- job_history_display(current_project())
     tool <- input$job_tool_filter %||% "All"
-    if (NROW(jobs) && !identical(tool, "All") && "step" %in% names(jobs)) jobs <- jobs[jobs$step == tool, , drop = FALSE]
-    jobs
+    jobs <- filter_jobs_by_tool(all_jobs, tool)
+    empty_job_filter_message(jobs, all_jobs, tool)
   }, page_length = 50)
 
   output$job_filter_ui <- renderUI({
     jobs <- job_history_display(current_project())
-    steps <- if (NROW(jobs) && "step" %in% names(jobs)) sort(unique(jobs$step)) else pipeline_order()
-    selectInput("job_tool_filter", "Filter jobs by tool", choices = c("All", steps), selected = input$job_tool_filter %||% "All", selectize = FALSE)
+    choices <- job_filter_choices_from_jobs(jobs)
+    selected <- isolate(input$job_tool_filter %||% "All")
+    if (!selected %in% choices) selected <- "All"
+    selectInput("job_tool_filter", "Filter jobs by tool", choices = choices, selected = selected, selectize = FALSE)
   })
 
   output$log_file_ui <- renderUI({
