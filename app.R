@@ -1136,6 +1136,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       } else data.frame()
       active <- NROW(active_hit) > 0 || step %in% names(active_states)
       slurm_state <- if (NROW(active_hit)) tail(active_hit$slurm_state, 1) else if (active && step %in% names(active_states)) active_states[[step]] else ""
+      elapsed <- if (NROW(active_hit) && "elapsed" %in% names(active_hit)) tail(active_hit$elapsed, 1) else ""
       min_size <- minimum_expected_bytes(step)
       complete_outputs <- length(sizes) > 0 && all(sizes >= min_size)
       growing <- active && has_previous && size > previous_size
@@ -1179,6 +1180,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         status = status,
         display_status = display_status,
         slurm_state = slurm_state,
+        time_running = elapsed,
         output_bytes = size,
         target = target,
         note = note,
@@ -1243,39 +1245,33 @@ sample_progress_matrix_ui <- function(progress_df) {
   )
 }
 
-sample_progress_step_ui <- function(progress_df, step) {
+tool_progress_output_id <- function(step) {
+  paste0("tool_progress_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
+sample_progress_step_table <- function(progress_df, step) {
   if (!NROW(progress_df) || !"step" %in% names(progress_df)) return(NULL)
   hit <- progress_df[progress_df$step == step, , drop = FALSE]
   if (!NROW(hit)) return(NULL)
   active_statuses <- c("Waiting", "Running", "Running, no growth yet", "Possibly incomplete")
   if (!any(hit$status %in% active_statuses)) return(NULL)
   hit <- hit[order(hit$sample), , drop = FALSE]
+  data.frame(
+    Sample = hit$sample,
+    Status = hit$display_status,
+    `Time running` = ifelse(nzchar(hit$time_running %||% ""), hit$time_running, "-"),
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+}
+
+sample_progress_step_ui <- function(progress_df, step) {
+  table <- sample_progress_step_table(progress_df, step)
+  if (!NROW(table)) return(NULL)
   div(
     class = "tool-progress-wrap",
     div(class = "tool-progress-title", "Sample progress"),
-    tags$table(
-      class = "tool-progress-table",
-      tags$thead(tags$tr(
-        tags$th("Sample"),
-        tags$th("Status"),
-        tags$th("Output"),
-        tags$th("SLURM")
-      )),
-      tags$tbody(lapply(seq_len(NROW(hit)), function(i) {
-        title <- paste0(
-          "Status: ", hit$status[i],
-          "\nBytes: ", hit$output_bytes[i],
-          "\nPath: ", hit$target[i],
-          if (nzchar(hit$note[i])) paste0("\nNote: ", hit$note[i]) else ""
-        )
-        tags$tr(
-          tags$td(class = "sample-name", hit$sample[i]),
-          tags$td(tags$span(class = status_class(hit$status[i]), title = title, hit$display_status[i])),
-          tags$td(if (hit$status[i] %in% c("Completed", "Possibly incomplete") && hit$output_bytes[i] > 0) paste(format(hit$output_bytes[i], big.mark = ",", scientific = FALSE), "bytes") else "-"),
-          tags$td(if (nzchar(hit$slurm_state[i])) hit$slurm_state[i] else "-")
-        )
-      }))
-    )
+    table_output(tool_progress_output_id(step))
   )
 }
 
@@ -1324,7 +1320,7 @@ append_run_manifest <- function(project, step, sample = "", command = character(
 }
 
 extract_output_field <- function(x, key) {
-  text <- gsub("\\\\n", "\n", as.character(x %||% ""), fixed = TRUE)
+  text <- gsub("\\\\+n", "\n", as.character(x %||% ""), perl = TRUE)
   lines <- trimws(unlist(strsplit(text, "\n", fixed = TRUE)))
   prefix <- paste0(key, ":")
   hit <- lines[startsWith(lines, prefix)]
