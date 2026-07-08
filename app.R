@@ -346,6 +346,11 @@ new_project_from_inputs <- function(input) {
   data_dir <- file.path(results_root, project_name, "data")
   design_path <- trimws(input$new_design_matrix_path %||% "")
   if (!nzchar(design_path)) design_path <- file.path(data_dir, "manifest", "design_matrix.txt")
+  else if (dir.exists(path.expand(design_path))) {
+    design_path <- file.path(normalizePath(path.expand(design_path), winslash = "/", mustWork = FALSE), "design_matrix.txt")
+  } else if (basename(design_path) != "design_matrix.txt") {
+    design_path <- file.path(normalizePath(dirname(path.expand(design_path)), winslash = "/", mustWork = FALSE), "design_matrix.txt")
+  }
   design_path <- normalizePath(path.expand(design_path), winslash = "/", mustWork = FALSE)
   fastq_dir <- normalizePath(path.expand(input$new_fastq_dir %||% ""), winslash = "/", mustWork = FALSE)
   paired <- !tolower(input$new_paired_end %||% "paired") %in% c("single", "se", "n", "no", "false")
@@ -891,17 +896,6 @@ server_browser_choices <- function(path, mode = "dir") {
   if (length(dirs)) {
     choices <- stats::setNames(dirs, paste0(basename(dirs), "/"))
   }
-  if (identical(mode, "file")) {
-    files <- list.files(path, recursive = FALSE, full.names = TRUE)
-    files <- files[file.exists(files) & !dir.exists(files)]
-    files <- files[!grepl("^\\.", basename(files))]
-    files <- files[basename(files) != "__pycache__"]
-    files <- sort(files)
-    if (length(files)) {
-      file_choices <- stats::setNames(files, basename(files))
-      choices <- c(choices, file_choices)
-    }
-  }
   if (!length(choices)) {
     fallback <- first_scalar_string(path, path.expand("~"))
     choices <- stats::setNames(fallback, "(empty folder)")
@@ -911,7 +905,7 @@ server_browser_choices <- function(path, mode = "dir") {
 
 browser_start_path <- function(value, mode = "dir") {
   value <- path.expand(trimws(first_scalar_string(value, "")))
-  if (nzchar(value) && identical(mode, "file") && file.exists(value)) return(dirname(value))
+  if (nzchar(value) && file.exists(value) && !dir.exists(value)) return(dirname(value))
   if (nzchar(value) && dir.exists(value)) return(value)
   if (nzchar(value) && dir.exists(dirname(value))) return(dirname(value))
   path.expand("~")
@@ -2357,7 +2351,7 @@ server <- function(input, output, session) {
     path_browser$target <- target
     path_browser$mode <- mode
     path_browser$path <- normalizePath(browser_start_path(current, mode), winslash = "/", mustWork = FALSE)
-    title <- if (identical(mode, "file")) "Choose a server file" else "Choose a server folder"
+    title <- "Choose a server folder"
     showModal(modalDialog(
       title = title,
       div(class = "path-browser-modal",
@@ -2372,7 +2366,7 @@ server <- function(input, output, session) {
       ),
       footer = tagList(
         modalButton("Cancel"),
-        actionButton("browser_use_current", if (identical(mode, "file")) "Use selected/current" else "Use this folder", class = "btn-primary")
+        actionButton("browser_use_current", "Use this folder", class = "btn-primary")
       ),
       easyClose = TRUE,
       size = "l"
@@ -2386,7 +2380,7 @@ server <- function(input, output, session) {
   output$browser_choices_ui <- renderUI({
     choices <- server_browser_choices(path_browser$path, path_browser$mode)
     if (!length(choices)) choices <- stats::setNames(first_scalar_string(path_browser$path, path.expand("~")), "(empty folder)")
-    label <- if (identical(path_browser$mode, "file")) "Folders and files" else "Folders"
+    label <- "Folders"
     selected <- unname(choices[[1]])
     selectInput("browser_choice", label, choices = choices, selected = selected, selectize = FALSE, size = min(max(length(choices), 4), 18))
   })
@@ -2400,7 +2394,7 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$browse_new_design_matrix_path, {
-    open_server_browser("new_design_matrix_path", "file", input$new_design_matrix_path %||% "")
+    open_server_browser("new_design_matrix_path", "dir", input$new_design_matrix_path %||% "")
   })
 
   observeEvent(input$browser_go_path, {
@@ -2420,21 +2414,11 @@ server <- function(input, output, session) {
     if (dir.exists(choice)) {
       path_browser$path <- normalizePath(choice, winslash = "/", mustWork = FALSE)
       updateTextInput(session, "browser_manual_path", value = path_browser$path)
-    } else if (identical(path_browser$mode, "file") && file.exists(choice)) {
-      updateTextInput(session, path_browser$target, value = normalizePath(choice, winslash = "/", mustWork = FALSE))
-      removeModal()
     }
   })
 
   observeEvent(input$browser_use_current, {
-    choice <- input$browser_choice %||% ""
-    if (identical(path_browser$mode, "file") && nzchar(choice) && file.exists(choice) && !dir.exists(choice)) {
-      value <- normalizePath(choice, winslash = "/", mustWork = FALSE)
-    } else if (identical(path_browser$mode, "file")) {
-      value <- file.path(normalizePath(path_browser$path, winslash = "/", mustWork = FALSE), "design_matrix.txt")
-    } else {
-      value <- normalizePath(path_browser$path, winslash = "/", mustWork = FALSE)
-    }
+    value <- normalizePath(path_browser$path, winslash = "/", mustWork = FALSE)
     updateTextInput(session, path_browser$target, value = value)
     removeModal()
   })
@@ -2477,7 +2461,7 @@ server <- function(input, output, session) {
           actionButton("browse_new_results_root", "Browse server", class = "btn-default")
       ),
       div(class = "new-project-path-control",
-          textInput("new_design_matrix_path", "Design matrix path", value = "", placeholder = "Optional; defaults to <results>/<project>/data/manifest/design_matrix.txt"),
+          textInput("new_design_matrix_path", "Design matrix folder", value = "", placeholder = "Optional; folder containing or receiving design_matrix.txt"),
           actionButton("browse_new_design_matrix_path", "Browse server", class = "btn-default")
       ),
       actionButton("create_project_config", "Create project", class = "btn-primary"),
