@@ -2808,7 +2808,6 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
             actionButton(tool_cancel_button_id(step), "Cancel active jobs", class = "btn-danger btn-sm")
         ),
         div(class = "tool-delete-zone",
-            div(class = "tool-delete-title", "Danger zone"),
             checkboxInput(tool_delete_data_confirm_id(step), paste("Confirm delete", step, "data outputs"), value = FALSE),
             actionButton(tool_delete_data_button_id(step), "Delete step data", class = "btn-danger btn-sm")
         ),
@@ -3026,7 +3025,6 @@ body { background:#eef3f8; color:#17202f; }
 .tool-cancel-zone .form-group { margin:0; }
 .tool-cancel-zone label { color:#8a2f24; font-weight:700; }
 .tool-delete-zone { margin-top:8px; padding:10px 12px; border:1px solid #f0c1ba; border-radius:8px; background:#fff7f5; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-.tool-delete-title { width:100%; color:#8a2f24; font-size:12px; font-weight:900; text-transform:uppercase; letter-spacing:.05em; }
 .tool-delete-zone .form-group { margin:0; }
 .tool-delete-zone label { color:#8a2f24; font-weight:800; }
 .tool-progress-wrap { margin-top:16px; border:1px solid #d8dde8; border-radius:8px; overflow:hidden; background:#f8fafc; }
