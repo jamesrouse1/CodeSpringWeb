@@ -2705,7 +2705,7 @@ comparison_label_from_file <- function(file, jobs = data.frame(), step = "DESeq2
   reference <- hit[[3]]
   compare_col <- ""
   if (NROW(jobs) && all(c("step", "input_mode") %in% names(jobs))) {
-    job_hit <- jobs[jobs$step == step & grepl(paste0("(^| )", comparison, " vs ", reference, "($| )"), jobs$input_mode), , drop = FALSE]
+    job_hit <- jobs[jobs$step == step & grepl(paste(comparison, "vs", reference), jobs$input_mode, fixed = TRUE), , drop = FALSE]
     if (NROW(job_hit)) {
       parsed <- parse_comparison_label(tail(job_hit$input_mode, 1))
       if (nzchar(parsed)) return(parsed)
@@ -2728,7 +2728,11 @@ completed_project_level_runs <- function(project, step, jobs = NULL) {
       list.files(gsea_dir, pattern = "gseapy\\.gene_set\\.gsea\\.report\\.csv$|^report\\.gseapy\\..*\\.csv$", recursive = TRUE, full.names = TRUE)
     } else character(0)
     labels <- vapply(files, function(file) {
-      rel_dir <- dirname(sub(paste0("^", gsub("([\\.^$|()\\[\\]{}*+?\\\\])", "\\\\\\1", gsea_dir), "/?"), "", file))
+      root <- normalizePath(gsea_dir, winslash = "/", mustWork = FALSE)
+      full <- normalizePath(file, winslash = "/", mustWork = FALSE)
+      prefix <- paste0(sub("/+$", "", root), "/")
+      rel <- if (startsWith(full, prefix)) substring(full, nchar(prefix) + 1) else basename(file)
+      rel_dir <- dirname(rel)
       if (!nzchar(rel_dir) || identical(rel_dir, ".")) rel_dir <- basename(dirname(file))
       if (grepl("^report\\.gseapy\\..*\\.csv$", basename(file))) {
         db <- sub("^report\\.gseapy\\.", "", basename(file))
