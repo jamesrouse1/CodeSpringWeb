@@ -33,14 +33,6 @@ Example launcher output. The port in your terminal may differ if the default por
 
 ![CodeSpringApp launcher output](docs/assets/launcher_output.png)
 
-If your server folder is still named `CodeSpringWeb`, either rename it or run from that folder:
-
-```bash
-mv ~/CodeSpringWeb ~/CodeSpringApp
-cd ~/CodeSpringApp
-./run_codespringweb.sh
-```
-
 ## What It Does
 
 - Creates or resumes CodeSpringLab projects from saved project configs.
