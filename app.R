@@ -3003,6 +3003,10 @@ missing_read_message <- function(project, pairs, trimmed = FALSE) {
       sep = "\n"
     ))
   }
+  if (isTRUE(trimmed)) {
+    active_msg <- active_upstream_message(project, "Cutadapt", "steps that use trimmed reads")
+    if (nzchar(active_msg)) return(active_msg)
+  }
   read_base <- if (isTRUE(trimmed)) file.path(project$data_dir, "cutadapt") else project$fastq_dir
   if (!nzchar(read_base %||% "") || !dir.exists(read_base)) {
     return(paste(
@@ -3181,6 +3185,8 @@ missing_star_message <- function(project, step = "this step", transcriptome = FA
       sep = "\n"
     ))
   }
+  active_msg <- active_upstream_message(project, "STAR", step)
+  if (nzchar(active_msg)) return(active_msg)
   files <- expected_star_bam_files(project, transcriptome)
   if (!length(files)) return("No samples were found in design_matrix.txt.")
   missing <- files[!file.exists(files) | vapply(files, file_size_for, numeric(1)) <= 0]
@@ -3200,6 +3206,36 @@ featurecounts_outputs_ready <- function(project) {
   length(files) > 0 && all(file.exists(files)) && all(vapply(files, file_size_for, numeric(1)) > 0)
 }
 
+active_jobs_for_step <- function(project, step) {
+  jobs <- job_history(project)
+  if (!NROW(jobs) || !"step" %in% names(jobs) || !"slurm_state" %in% names(jobs)) return(data.frame())
+  hit <- jobs[
+    canonical_job_step(jobs$step) == canonical_job_step(step) &
+      jobs$slurm_state %in% active_slurm_states(),
+    ,
+    drop = FALSE
+  ]
+  if ("job_id" %in% names(hit)) hit <- hit[nzchar(hit$job_id), , drop = FALSE]
+  hit
+}
+
+active_upstream_message <- function(project, upstream_step, downstream_step) {
+  active <- active_jobs_for_step(project, upstream_step)
+  if (!NROW(active)) return("")
+  sample_or_target <- if ("sample" %in% names(active)) as.character(active$sample) else character(NROW(active))
+  if ("target" %in% names(active)) {
+    empty_sample <- !nzchar(sample_or_target %||% "")
+    sample_or_target[empty_sample] <- basename(as.character(active$target[empty_sample]))
+  }
+  sample_or_target <- sample_or_target[nzchar(sample_or_target)]
+  job_ids <- if ("job_id" %in% names(active)) unique(as.character(active$job_id[nzchar(active$job_id)])) else character(0)
+  paste(c(
+    paste("Wait for", upstream_step, "to fully finish before running", downstream_step, "."),
+    if (length(sample_or_target)) paste("Still active:", paste(unique(sample_or_target), collapse = ", ")),
+    if (length(job_ids)) paste("Active SLURM job IDs:", paste(job_ids, collapse = ", "))
+  ), collapse = "\n")
+}
+
 featurecounts_matrix_job_active <- function(jobs, matrix_path) {
   if (!NROW(jobs) || !"target" %in% names(jobs) || !"slurm_state" %in% names(jobs)) return(FALSE)
   active_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
@@ -3209,6 +3245,10 @@ featurecounts_matrix_job_active <- function(jobs, matrix_path) {
 
 submit_deseq2_job <- function(project, compare_col, reference, comparison, redundant = "NoRedundant", gene_name_counts = FALSE) {
   count_matrix <- file.path(project$data_dir, "counts", "count_matrix.txt")
+  active_msg <- active_upstream_message(project, "featureCounts", "DESeq2")
+  if (nzchar(active_msg)) {
+    return(record_preflight_failure(project, "DESeq2", active_msg, "deseq2"))
+  }
   if (!file.exists(count_matrix) || file_size_for(count_matrix) <= 0) {
     msg <- paste(
       "Run featureCounts successfully before DESeq2 so count_matrix.txt exists.",
@@ -3378,6 +3418,10 @@ submit_gseapy_job <- function(project, compare_col, reference, comparison, genes
   if (!nzchar(geneset)) stop("Choose a GSEA gene-set database.")
   deseq_dir <- file.path(project$data_dir, "deseq2")
   normalized_file <- file.path(deseq_dir, paste0("normalized_counts_", comparison, "_vs_", reference, "(ref).txt"))
+  active_msg <- active_upstream_message(project, "DESeq2", "GSEA")
+  if (nzchar(active_msg)) {
+    return(record_preflight_failure(project, "GSEA", active_msg, "gseapy"))
+  }
   if (!file.exists(normalized_file)) {
     msg <- paste(
       "Run DESeq2 successfully for this exact comparison before GSEA.",
