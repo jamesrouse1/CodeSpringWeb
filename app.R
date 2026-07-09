@@ -2062,7 +2062,7 @@ format_metric_value <- function(x, suffix = "", digits = 1) {
 
 latest_job_for_sample <- function(jobs, step, sample) {
   if (!NROW(jobs) || !"step" %in% names(jobs)) return(data.frame())
-  hit <- jobs[jobs$step == step, , drop = FALSE]
+  hit <- jobs[canonical_job_step(jobs$step) == canonical_job_step(step), , drop = FALSE]
   if ("sample" %in% names(hit) && NROW(hit)) {
     sample_hit <- hit[nzchar(hit$sample) & hit$sample == sample, , drop = FALSE]
     if (NROW(sample_hit)) hit <- sample_hit
@@ -3109,8 +3109,10 @@ sample_submission_plan <- function(project, step, target_list) {
   } else data.frame()
   active <- character(0)
   complete <- character(0)
+  retry <- character(0)
   submit <- character(0)
   min_size <- minimum_expected_bytes(canonical_job_step(step))
+  retry_states <- c("CANCELLED", "CANCELLED+", "CA", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL")
   for (sample in samples) {
     sample_active <- FALSE
     if (NROW(active_jobs)) {
@@ -3123,15 +3125,24 @@ sample_submission_plan <- function(project, step, target_list) {
     targets <- target_list[[sample]]
     targets <- targets[nzchar(targets)]
     sample_complete <- length(targets) > 0 && all(file.exists(targets)) && all(vapply(targets, file_size_for, numeric(1)) >= min_size)
+    latest <- latest_job_for_sample(jobs, step, sample)
+    latest_state <- if (NROW(latest) && "slurm_state" %in% names(latest)) latest$slurm_state[1] else ""
+    deleted_status <- latest_deleted_status(project, step, sample)
+    should_retry <- latest_state %in% retry_states || grepl(", Deleted$", deleted_status)
     if (sample_active) active <- c(active, sample)
+    else if (should_retry) {
+      retry <- c(retry, sample)
+      submit <- c(submit, sample)
+    }
     else if (sample_complete) complete <- c(complete, sample)
     else submit <- c(submit, sample)
   }
   notes <- character(0)
   if (length(active)) notes <- c(notes, paste("Skipped active samples:", paste(active, collapse = ", ")))
   if (length(complete)) notes <- c(notes, paste("Skipped completed samples:", paste(complete, collapse = ", ")))
+  if (length(retry)) notes <- c(notes, paste("Resubmitting failed/cancelled/deleted samples:", paste(unique(retry), collapse = ", ")))
   if (!length(submit) && !length(active)) notes <- c(notes, paste("All samples are already complete for", step, ". Delete selected sample data first if you want to force a rerun."))
-  list(samples = unique(submit), active = unique(active), complete = unique(complete), message = paste(notes, collapse = "\n"))
+  list(samples = unique(submit), active = unique(active), complete = unique(complete), retry = unique(retry), message = paste(notes, collapse = "\n"))
 }
 
 append_plan_message <- function(messages, plan) {

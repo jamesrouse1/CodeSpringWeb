@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodeSpringApp Preview</title>
+  <style>
+    :root {
+      --ink: #0f172a;
+      --muted: #64748b;
+      --line: #dbe3ef;
+      --panel: #ffffff;
+      --soft: #f6f8fb;
+      --blue: #1d4ed8;
+      --green: #047857;
+      --orange: #b45309;
+      --shadow: 0 18px 55px rgba(15, 23, 42, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: linear-gradient(180deg, #eef4fb 0%, #ffffff 38%, #f7fafc 100%);
+    }
+    header {
+      border-bottom: 1px solid rgba(148, 163, 184, 0.28);
+      background: rgba(255, 255, 255, 0.86);
+      backdrop-filter: blur(16px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .nav {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 18px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+    .mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #0f766e, #2563eb);
+      box-shadow: 0 10px 24px rgba(37, 99, 235, 0.22);
+    }
+    nav a {
+      color: #334155;
+      text-decoration: none;
+      font-weight: 650;
+      font-size: 14px;
+      margin-left: 18px;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 52px 24px 72px; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 0.86fr) minmax(320px, 1.14fr);
+      gap: 34px;
+      align-items: center;
+      margin-bottom: 46px;
+    }
+    .eyebrow {
+      color: var(--green);
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: clamp(42px, 7vw, 76px);
+      line-height: 0.95;
+      margin: 0 0 18px;
+      letter-spacing: 0;
+    }
+    .lead {
+      font-size: 19px;
+      line-height: 1.58;
+      color: #334155;
+      margin: 0 0 26px;
+      max-width: 680px;
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 16px;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 760;
+      border: 1px solid var(--line);
+      color: #0f172a;
+      background: white;
+    }
+    .btn.primary { background: var(--blue); color: white; border-color: var(--blue); }
+    .hero-shot {
+      border: 1px solid rgba(148, 163, 184, 0.34);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: var(--shadow);
+      background: white;
+    }
+    .hero-shot img { width: 100%; display: block; }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin: 0 0 48px;
+    }
+    .stat {
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.76);
+      border-radius: 10px;
+      padding: 18px;
+    }
+    .stat strong { display: block; font-size: 26px; margin-bottom: 4px; }
+    .stat span { color: var(--muted); font-weight: 650; }
+    section { margin-top: 56px; }
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+    h2 { margin: 0; font-size: 30px; letter-spacing: 0; }
+    .section-head p { margin: 0; color: var(--muted); max-width: 620px; line-height: 1.5; }
+    .workflow {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    .step {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 10px;
+      padding: 18px;
+      min-height: 152px;
+    }
+    .step-num {
+      display: inline-grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      background: #e0f2fe;
+      color: #075985;
+      font-weight: 850;
+      margin-bottom: 14px;
+    }
+    .step h3 { margin: 0 0 8px; font-size: 18px; }
+    .step p { margin: 0; color: var(--muted); line-height: 1.48; }
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px;
+    }
+    .shot {
+      border: 1px solid var(--line);
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 12px 34px rgba(15, 23, 42, 0.08);
+    }
+    .shot img { width: 100%; display: block; }
+    .shot-copy { padding: 16px 18px 18px; }
+    .shot-copy h3 { margin: 0 0 6px; font-size: 18px; }
+    .shot-copy p { margin: 0; color: var(--muted); line-height: 1.48; }
+    .run {
+      border: 1px solid var(--line);
+      background: #0f172a;
+      color: white;
+      border-radius: 12px;
+      padding: 24px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 20px;
+      align-items: center;
+    }
+    .run p { color: #cbd5e1; margin: 8px 0 0; }
+    code {
+      background: rgba(15, 23, 42, 0.06);
+      border: 1px solid rgba(15, 23, 42, 0.08);
+      border-radius: 6px;
+      padding: 2px 6px;
+      font-size: 0.94em;
+    }
+    .run code {
+      display: block;
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.15);
+      color: #e2e8f0;
+      padding: 10px 12px;
+      white-space: nowrap;
+    }
+    footer {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 24px 46px;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+    }
+    @media (max-width: 920px) {
+      .hero, .stats, .workflow, .gallery, .run { grid-template-columns: 1fr; }
+      nav { display: none; }
+      main { padding-top: 34px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="nav">
+      <div class="brand"><span class="mark"></span><span>CodeSpringApp</span></div>
+      <nav>
+        <a href="#workflow">Workflow</a>
+        <a href="#preview">Preview</a>
+        <a href="#run">Run</a>
+        <a href="https://github.com/jamesrouse1/CodeSpringApp">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <main>
+    <section class="hero">
+      <div>
+        <div class="eyebrow">CodeSpringLab on one server port</div>
+        <h1>Run RNA-seq projects without notebook prompt fatigue.</h1>
+        <p class="lead">CodeSpringApp wraps CodeSpringLab in a polished Shiny interface for project setup, design matrices, SLURM jobs, progress, logs, methods, and results visualization.</p>
+        <div class="actions">
+          <a class="btn primary" href="#preview">View preview</a>
+          <a class="btn" href="https://github.com/jamesrouse1/CodeSpringApp">Open repository</a>
+        </div>
+      </div>
+      <div class="hero-shot">
+        <img src="assets/results_explorer_heatmap.png" alt="CodeSpringApp heatmap results explorer">
+      </div>
+    </section>
+
+    <div class="stats">
+      <div class="stat"><strong>1</strong><span>server port</span></div>
+      <div class="stat"><strong>9</strong><span>pipeline steps</span></div>
+      <div class="stat"><strong>SLURM</strong><span>persistent jobs</span></div>
+      <div class="stat"><strong>DT</strong><span>scrollable tables</span></div>
+    </div>
+
+    <section id="workflow">
+      <div class="section-head">
+        <h2>Workflow</h2>
+        <p>The static page is a visual tour. The real app runs on your HPC server with CodeSpringLab, project data, and reference genomes.</p>
+      </div>
+      <div class="workflow">
+        <div class="step"><span class="step-num">1</span><h3>Create or resume</h3><p>Select RNA-seq projects from saved configs or create a project with server-folder browsing.</p></div>
+        <div class="step"><span class="step-num">2</span><h3>Edit metadata</h3><p>Build a design matrix from FASTQs, include/exclude samples, and add comparison columns.</p></div>
+        <div class="step"><span class="step-num">3</span><h3>Submit jobs</h3><p>Run cutadapt, FastQC, STAR, featureCounts, DESeq2, GSEA, RSEM, and Kallisto through SLURM.</p></div>
+        <div class="step"><span class="step-num">4</span><h3>Track progress</h3><p>See running, completed, cancelled, deleted, and likely failed states per sample and step.</p></div>
+        <div class="step"><span class="step-num">5</span><h3>Explore results</h3><p>Use the embedded CodeSpringLab Results Explorer for QC, counts, plots, and pathway outputs.</p></div>
+        <div class="step"><span class="step-num">6</span><h3>Export methods</h3><p>Summarize genome references, tool versions, and step parameters for documentation.</p></div>
+      </div>
+    </section>
+
+    <section id="preview">
+      <div class="section-head">
+        <h2>Interface Preview</h2>
+        <p>Representative screenshots from the current Shiny interface.</p>
+      </div>
+      <div class="gallery">
+        <article class="shot">
+          <img src="assets/design_matrix.png" alt="Design matrix editor">
+          <div class="shot-copy"><h3>Design Matrix</h3><p>Editable include/sample/metadata table generated from FASTQ filenames.</p></div>
+        </article>
+        <article class="shot">
+          <img src="assets/run_pipeline.png" alt="Run pipeline page">
+          <div class="shot-copy"><h3>Run Pipeline</h3><p>Step cards expose parameters, submit buttons, progress, cancel, and delete controls.</p></div>
+        </article>
+        <article class="shot">
+          <img src="assets/progress.png" alt="Pipeline progress">
+          <div class="shot-copy"><h3>Progress</h3><p>Color-coded workflow and sample-by-step status matrix.</p></div>
+        </article>
+        <article class="shot">
+          <img src="assets/results_explorer_qc.png" alt="Results explorer QC">
+          <div class="shot-copy"><h3>Results Explorer</h3><p>FastQC, count matrices, DESeq2 plots, heatmaps, and GSEA outputs in one app.</p></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="run" class="run">
+      <div>
+        <h2>Run on the server</h2>
+        <p>Start the app on the server, then open an SSH tunnel from your laptop.</p>
+      </div>
+      <div>
+        <code>cd ~/CodeSpringApp</code>
+        <code>./run_codespringweb.sh 8601</code>
+        <code>ssh -N -L 8601:localhost:8601 rouse@bamdev1</code>
+      </div>
+    </section>
+  </main>
+  <footer>
+    Developed for CodeSpringLab workflows by James Rouse, Rad Utama, and Alex Dobin at the Bioinformatics Shared Resource.
+  </footer>
+</body>
+</html>
+
