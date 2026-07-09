@@ -872,6 +872,10 @@ job_history <- function(project) {
   jobs$target <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "target")
   jobs$stdout <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "stdout")
   jobs$stderr <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "stderr")
+  app_cancelled <- grepl("cancelled_by_codespringweb:[[:space:]]*true", as.character(jobs$output), ignore.case = TRUE)
+  jobs$slurm_state[grepl("^CANCELLED", jobs$slurm_state, ignore.case = TRUE)] <- "CANCELLED"
+  jobs$slurm_state[grepl("^COMPLETED", jobs$slurm_state, ignore.case = TRUE)] <- "COMPLETED"
+  jobs$slurm_state[app_cancelled] <- "CANCELLED"
   keep <- intersect(c("time", "step", "sample", "job_id", "slurm_state", "elapsed", "start_time", "end_time", "input_mode", "target", "stdout", "stderr"), names(jobs))
   jobs[, keep, drop = FALSE]
 }
@@ -922,6 +926,25 @@ cancel_active_step_jobs <- function(project, step) {
     return(paste("No active", step, "jobs were found for this project."))
   }
   out <- tryCatch(system2("scancel", ids, stdout = TRUE, stderr = TRUE), error = function(e) conditionMessage(e))
+  for (id in ids) {
+    row <- hit[hit$job_id == id, , drop = FALSE]
+    row <- if (NROW(row)) tail(row, 1) else data.frame()
+    save_job(
+      project,
+      step,
+      c("scancel", id),
+      paste(
+        c(
+          paste("job_id:", id),
+          "cancelled_by_codespringweb: true",
+          if (NROW(row) && "sample" %in% names(row) && nzchar(row$sample[1] %||% "")) paste("sample:", row$sample[1]),
+          if (NROW(row) && "target" %in% names(row) && nzchar(row$target[1] %||% "")) paste("target:", row$target[1]),
+          if (NROW(row) && "input_mode" %in% names(row) && nzchar(row$input_mode[1] %||% "")) paste("input_mode:", row$input_mode[1])
+        ),
+        collapse = "\n"
+      )
+    )
+  }
   msg <- paste0("Requested cancellation of ", length(ids), " active ", step, " job", if (length(ids) == 1) "" else "s", ": ", paste(ids, collapse = ", "))
   if (length(out) && any(nzchar(out))) msg <- paste(msg, paste(out[nzchar(out)], collapse = "\n"), sep = "\n")
   msg
@@ -1393,7 +1416,7 @@ active_job_state_map_from_jobs <- function(jobs) {
 
 normalize_pipeline_status <- function(status) {
   status <- as.character(status)
-  ifelse(status %in% c("Complete"), "Complete", ifelse(status %in% c("Active"), "Active", "Not started"))
+  ifelse(status %in% c("Complete"), "Complete", ifelse(status %in% c("Active"), "Active", ifelse(status %in% c("Cancelled"), "Cancelled", "Not started")))
 }
 
 status_signature <- function(status) {
@@ -1442,18 +1465,24 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   for (step in c("DESeq2", "GSEA")) {
     complete <- completed_project_level_runs(project, step, jobs)
     running <- running_project_level_runs(jobs, step)
+    cancelled <- cancelled_project_level_runs(jobs, step)
     if (length(complete) && length(running)) running <- drop_running_completed_labels(running, complete)
     pieces <- character(0)
     if (length(running)) pieces <- c(pieces, paste("Running:", paste(running, collapse = "; ")))
+    if (length(cancelled)) pieces <- c(pieces, paste("Cancelled:", paste(cancelled, collapse = "; ")))
     if (length(complete)) pieces <- c(pieces, paste("Complete:", paste(complete, collapse = "; ")))
     raw$detail[raw$step == step] <- paste(pieces, collapse = " | ")
+    if (length(cancelled)) raw$status[raw$step == step] <- "Cancelled"
+    if (length(running)) raw$status[raw$step == step] <- "Active"
   }
   if (is.null(progress)) progress <- tryCatch(sample_progress(project, active_states, data.frame(), jobs = jobs)$table, error = function(e) data.frame())
   if (NROW(progress)) {
     for (step in c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
       hit <- progress[progress$step == step, , drop = FALSE]
       if (!NROW(hit)) next
-      if (all(hit$status %in% c("Completed", "Optional, not run")) && any(hit$status == "Completed")) {
+      if (any(hit$status == "Cancelled")) {
+        raw$status[raw$step == step] <- "Cancelled"
+      } else if (all(hit$status %in% c("Completed", "Optional, not run")) && any(hit$status == "Completed")) {
         raw$status[raw$step == step] <- "Complete"
       } else if (any(hit$status %in% c("Running", "Running, no growth yet", "Waiting"))) {
         raw$status[raw$step == step] <- "Active"
@@ -1465,14 +1494,14 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     }
   }
   active <- names(active_states)
-  raw$status[raw$step %in% active & raw$status != "Complete"] <- "Active"
+  raw$status[raw$step %in% active & !raw$status %in% c("Complete", "Cancelled")] <- "Active"
   if (!feature_matrix_exists && feature_count_files > 0) raw$status[raw$step == "featureCounts"] <- "Active"
   raw$status <- normalize_pipeline_status(raw$status)
   raw
 }
 
 status_rank <- function(status) {
-  match(status, c("Active", "Complete", "Not started"), nomatch = 99)
+  match(status, c("Active", "Cancelled", "Complete", "Not started"), nomatch = 99)
 }
 
 pipeline_order <- function() {
@@ -1488,7 +1517,7 @@ status_label <- function(status) {
 }
 
 status_pill <- function(status) {
-  cls <- switch(status, "Active" = "active", "Complete" = "complete", "not-started")
+  cls <- switch(status, "Active" = "active", "Complete" = "complete", "Cancelled" = "cancelled", "not-started")
   tags$span(class = paste("status-pill", cls), status_label(status))
 }
 
@@ -1586,7 +1615,8 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   sample_steps <- c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
   if (is.null(jobs)) jobs <- job_history(project)
   active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
-  completed_job_states <- c("COMPLETED", "COMPLETED+", "CD", "Finished or not in queue")
+  completed_job_states <- c("COMPLETED", "COMPLETED+", "CD")
+  cancelled_job_states <- c("CANCELLED", "CANCELLED+", "CA", "TIMEOUT", "FAILED", "NODE_FAIL", "PREEMPTED")
   active_jobs <- if (NROW(jobs) && "slurm_state" %in% names(jobs)) jobs[jobs$slurm_state %in% active_job_states, , drop = FALSE] else data.frame()
   rows <- list()
   cache_rows <- list()
@@ -1623,7 +1653,10 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       slurm_running <- active && slurm_state %in% c("RUNNING", "COMPLETING")
       slurm_waiting <- active && slurm_state %in% c("PENDING", "CONFIGURING", "Submitted")
       slurm_complete <- slurm_state %in% completed_job_states
-      status <- if ((complete_outputs || (slurm_complete && size > 0)) && !growing && !slurm_running) {
+      slurm_cancelled <- slurm_state %in% cancelled_job_states
+      status <- if (slurm_cancelled) {
+        "Cancelled"
+      } else if ((complete_outputs || (slurm_complete && size > 0)) && !growing && !slurm_running) {
         "Completed"
       } else if (slurm_running) {
         "Running"
@@ -1644,6 +1677,8 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       }
       note <- if (status == "Possibly incomplete") {
         paste0("Output exists but is smaller than expected (<", min_size, " bytes).")
+      } else if (identical(status, "Cancelled")) {
+        "SLURM reports this job was cancelled or failed."
       } else if (identical(status, "Running, no growth yet")) {
         "File exists but size did not increase since the last refresh."
       } else if (identical(status, "Running") && growing) {
@@ -2776,7 +2811,7 @@ pipeline_stepper_ui <- function(project, status = NULL) {
     st <- status$status[hit] %||% "Not started"
     mode <- status$input[hit] %||% ""
     detail <- if ("detail" %in% names(status)) status$detail[hit] %||% "" else ""
-    cls <- switch(st, "Complete" = "complete", "Active" = "active", "not-started")
+    cls <- switch(st, "Complete" = "complete", "Active" = "active", "Cancelled" = "cancelled", "not-started")
     div(class = paste("pipeline-step", cls),
         div(class = "step-index", meta$order[i]),
         div(class = "step-main",
@@ -2790,7 +2825,7 @@ pipeline_stepper_ui <- function(project, status = NULL) {
 tool_panel <- function(step, status, description, controls, button_id, button_label, progress_df = data.frame()) {
   st <- status$status[match(step, status$step)] %||% "Not started"
   mode <- status$input[match(step, status$step)] %||% ""
-  cls <- switch(st, "Complete" = "complete", "Active" = "active", "not-started")
+  cls <- switch(st, "Complete" = "complete", "Active" = "active", "Cancelled" = "cancelled", "not-started")
   tags$details(
     class = paste("tool-panel", cls),
     open = identical(st, "Active") || identical(st, "Not started"),
@@ -2942,11 +2977,24 @@ running_project_level_runs <- function(jobs, step) {
   sort(unique(labels[nzchar(labels)]))
 }
 
+cancelled_project_level_runs <- function(jobs, step) {
+  if (!NROW(jobs) || !"step" %in% names(jobs) || !"slurm_state" %in% names(jobs)) return(character(0))
+  cancelled_states <- c("CANCELLED", "CANCELLED+", "CA", "TIMEOUT", "FAILED", "NODE_FAIL", "PREEMPTED")
+  hit <- jobs[jobs$step == step & jobs$slurm_state %in% cancelled_states, , drop = FALSE]
+  if (!NROW(hit)) return(character(0))
+  labels <- if ("input_mode" %in% names(hit)) as.character(hit$input_mode) else rep("", NROW(hit))
+  fallback <- if ("job_id" %in% names(hit)) paste("Job", hit$job_id) else paste(step, seq_len(NROW(hit)))
+  labels <- mapply(clean_run_label, labels, fallback, USE.NAMES = FALSE)
+  labels <- vapply(labels, parse_comparison_label, character(1))
+  sort(unique(labels[nzchar(labels)]))
+}
+
 project_level_step_summary_ui <- function(project, jobs, step) {
   complete <- completed_project_level_runs(project, step, jobs)
   running <- running_project_level_runs(jobs, step)
+  cancelled <- cancelled_project_level_runs(jobs, step)
   if (length(complete) && length(running)) running <- drop_running_completed_labels(running, complete)
-  if (!length(complete) && !length(running)) return(NULL)
+  if (!length(complete) && !length(running) && !length(cancelled)) return(NULL)
   title <- if (identical(step, "GSEA")) "GSEA status" else "Comparison status"
   row_ui <- function(label, values, cls) {
     if (!length(values)) return(NULL)
@@ -2958,6 +3006,7 @@ project_level_step_summary_ui <- function(project, jobs, step) {
   div(class = "project-step-summary",
       div(class = "project-step-summary-title", title),
       row_ui("Running", running, "running"),
+      row_ui("Cancelled", cancelled, "cancelled"),
       row_ui("Complete", complete, "complete")
   )
 }
@@ -3005,6 +3054,7 @@ body { background:#eef3f8; color:#17202f; }
 .status-pill { display:inline-flex; align-items:center; border-radius:999px; padding:4px 9px; font-size:12px; font-weight:700; white-space:nowrap; }
 .status-pill.active { color:#7c3d00; background:#fff4d6; border:1px solid #f0c36d; }
 .status-pill.complete { color:#0b6b3a; background:#def7e8; border:1px solid #8fd8ad; }
+.status-pill.cancelled { color:#8a2f24; background:#fff0ed; border:1px solid #e5a397; }
 .status-pill.not-started { color:#526070; background:#eef2f7; border:1px solid #cfd7e3; }
 .run-grid { display:grid; grid-template-columns:1fr; gap:12px; margin-top:14px; }
 .run-card p { min-height:38px; margin-bottom:12px; }
@@ -3013,6 +3063,7 @@ body { background:#eef3f8; color:#17202f; }
 .tool-panel summary::-webkit-details-marker { display:none; }
 .tool-panel.complete { border-left:5px solid #27ae60; }
 .tool-panel.active { border-left:5px solid #d99a15; }
+.tool-panel.cancelled { border-left:5px solid #d55745; }
 .tool-panel.not-started { border-left:5px solid #d55745; }
 .tool-summary { display:flex; justify-content:space-between; align-items:center; gap:16px; }
 .tool-summary strong { display:block; font-size:16px; }
@@ -3042,6 +3093,7 @@ body { background:#eef3f8; color:#17202f; }
 .project-step-chip-wrap { display:flex; flex-wrap:wrap; gap:7px; flex:1; }
 .project-step-chip { border-radius:999px; border:1px solid #cfd7e3; background:white; padding:5px 9px; font-size:12px; font-weight:800; color:#304a66; max-width:100%; overflow-wrap:anywhere; }
 .project-step-chip.running { background:#fff4d6; color:#7c3d00; border-color:#f0c36d; }
+.project-step-chip.cancelled { background:#fff0ed; color:#8a2f24; border-color:#e5a397; }
 .project-step-chip.complete { background:#def7e8; color:#0b6b3a; border-color:#8fd8ad; }
 .adaptive-table-note { color:#657084; font-size:13px; font-weight:700; margin:0 0 10px 0; }
 .resource-strip { display:grid; grid-template-columns:minmax(280px,.85fr) minmax(460px,1.45fr); gap:16px; align-items:stretch; margin:12px 0 18px 0; }
@@ -3059,6 +3111,7 @@ body { background:#eef3f8; color:#17202f; }
 .pipeline-step { border:1px solid #d8dde8; border-radius:8px; padding:10px; display:flex; gap:10px; align-items:center; background:#fff4f3; }
 .pipeline-step.complete { background:#def7e8; border-color:#8fd8ad; }
 .pipeline-step.active { background:#fff4d6; border-color:#f0c36d; }
+.pipeline-step.cancelled { background:#fff0ed; border-color:#e5a397; }
 .step-index { width:28px; height:28px; border-radius:50%; background:white; display:flex; align-items:center; justify-content:center; font-weight:700; }
 .step-main { display:flex; flex-direction:column; line-height:1.2; }
 .step-main span, .step-main em { font-size:12px; color:#657084; margin-top:3px; font-style:normal; }
@@ -3077,6 +3130,7 @@ body { background:#eef3f8; color:#17202f; }
 .sample-status.completed { background:#def7e8; color:#0b6b3a; border-color:#8fd8ad; }
 .sample-status.running, .sample-status.running-no-growth-yet { background:#fff4d6; color:#7c3d00; border-color:#f0c36d; }
 .sample-status.waiting { background:#e8f2ff; color:#15549a; border-color:#b9d5f5; }
+.sample-status.cancelled { background:#fff0ed; color:#8a2f24; border-color:#e5a397; }
 .sample-status.possibly-incomplete { background:#fff0ed; color:#9f2d20; border-color:#e5a397; }
 .sample-status.optional-not-run { background:#f6f3fb; color:#5d4d79; border-color:#d9d0ea; }
 .project-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 8px 20px rgba(15,23,36,.06); }
@@ -3268,6 +3322,7 @@ body > .container-fluid > .row > .col-sm-10 {
 }
 .pipeline-step.complete { background: #eefaf3; }
 .pipeline-step.active { background: #fff8e6; }
+.pipeline-step.cancelled { background: #fff0ed; }
 .sample-matrix th {
   background: #10233a;
   color: #fff;
