@@ -2281,6 +2281,10 @@ tool_progress_ui_output_id <- function(step) {
   paste0("tool_progress_ui_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
 }
 
+tool_message_output_id <- function(step) {
+  paste0("tool_message_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
 tool_cancel_button_id <- function(step) {
   paste0("cancel_jobs_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
 }
@@ -3576,6 +3580,7 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
     div(class = "tool-body",
         controls,
         actionButton(button_id, button_label, class = "btn-primary"),
+        uiOutput(tool_message_output_id(step)),
         if (step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(step)) else NULL,
         div(class = "tool-cancel-zone",
             checkboxInput(tool_cancel_confirm_id(step), paste("Confirm cancel active", step, "jobs"), value = FALSE),
@@ -3821,6 +3826,7 @@ body { background:#eef3f8; color:#17202f; }
 .run-message-alert.error strong { color:#8a2f24; }
 .run-message-alert.success { background:#eefaf3; border-color:#b7dfc7; color:#315f4c; }
 .run-message-alert.active { background:#fff4d6; border-color:#f0c36d; color:#7c3d00; }
+.tool-message-alert { margin:12px 0; }
 .tool-cancel-zone { margin-top:12px; padding-top:12px; border-top:1px dashed #d8dde8; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .tool-cancel-zone .form-group { margin:0; }
 .tool-cancel-zone label { color:#8a2f24; font-weight:700; }
@@ -4411,7 +4417,6 @@ ui <- fluidPage(
                  verbatimTextOutput("design_save_status")),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed. If a path or design matrix check fails before sbatch, the app writes a pre-submit error log instead of submitting an empty job."),
-                 uiOutput("run_message_alert"),
                  uiOutput("run_resource_strip"),
                  uiOutput("run_pipeline_stepper"),
                  uiOutput("run_step_cards"),
@@ -4450,6 +4455,7 @@ server <- function(input, output, session) {
   projects <- reactiveVal(discover_projects())
   design_state <- reactiveVal(data.frame())
   run_message <- reactiveVal("")
+  tool_messages <- reactiveVal(list())
   progress_refresh <- reactiveVal(Sys.time())
   run_cards_refresh <- reactiveVal(Sys.time())
   native_registered_id <- reactiveVal("")
@@ -4528,14 +4534,47 @@ server <- function(input, output, session) {
     }, once = TRUE)
   }
 
-  mark_submission_active <- function(label, input_mode = "") {
-    p <- current_project()
+  submission_step <- function(label) {
     step <- switch(label,
       "RSEM" = "RSEM (optional)",
       "Kallisto" = "Kallisto (optional)",
       "GSEApy" = "GSEA",
       label
     )
+    step
+  }
+
+  message_class <- function(msg) {
+    if (startsWith(msg, "ERROR")) {
+      "error"
+    } else if (startsWith(msg, "Submitting") || grepl("Requested cancellation|Deleting|Canceling", msg)) {
+      "active"
+    } else {
+      "success"
+    }
+  }
+
+  message_title <- function(cls) {
+    if (identical(cls, "error")) "Could not submit job" else if (identical(cls, "active")) "Working" else "Submission status"
+  }
+
+  set_tool_message <- function(step, msg) {
+    msgs <- tool_messages()
+    msgs[[canonical_job_step(step)]] <- trimws(msg %||% "")
+    tool_messages(msgs)
+  }
+
+  tool_message_ui <- function(step) {
+    msg <- tool_messages()[[canonical_job_step(step)]] %||% ""
+    msg <- trimws(msg)
+    if (!nzchar(msg)) return(NULL)
+    cls <- message_class(msg)
+    div(class = paste("run-message-alert tool-message-alert", cls), tags$strong(message_title(cls)), msg)
+  }
+
+  mark_submission_active <- function(label, input_mode = "") {
+    p <- current_project()
+    step <- submission_step(label)
     sample_level_steps <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
     if (step %in% sample_level_steps) {
       optimistic <- optimistic_step_progress(p, step, input_mode)
@@ -4551,10 +4590,13 @@ server <- function(input, output, session) {
   }
 
   run_submission <- function(label, expr, input_mode = "") {
+    step <- submission_step(label)
     run_message(paste("Submitting", label, "..."))
+    set_tool_message(step, paste("Submitting", label, "..."))
     progress_refresh(Sys.time())
     msg <- tryCatch(force(expr), error = function(e) paste("ERROR submitting", label, ":", conditionMessage(e)))
     run_message(msg)
+    set_tool_message(step, msg)
     if (!startsWith(msg, "ERROR")) {
       tryCatch(
         {
@@ -4563,7 +4605,11 @@ server <- function(input, output, session) {
           job_history_state(carry_forward_job_elapsed(jobs_now, isolate(job_history_state())))
           progress_refresh(Sys.time())
         },
-        error = function(e) run_message(paste(msg, "\nProgress display update failed:", conditionMessage(e)))
+        error = function(e) {
+          combined <- paste(msg, "\nProgress display update failed:", conditionMessage(e))
+          run_message(combined)
+          set_tool_message(step, combined)
+        }
       )
       finish_submit_refresh()
     } else {
@@ -5107,7 +5153,9 @@ server <- function(input, output, session) {
     adapter1 <- selected_adapter_value(input$cutadapt_adapter1, input$cutadapt_adapter1_custom)
     adapter2 <- selected_adapter_value(input$cutadapt_adapter2, input$cutadapt_adapter2_custom)
     if (!nzchar(adapter1) || !nzchar(adapter2)) {
-      run_message("Custom adapter sequences cannot be blank.")
+      msg <- "ERROR: Not submitted. Custom adapter sequences cannot be blank."
+      run_message(msg)
+      set_tool_message("Cutadapt", msg)
       finish_submit_refresh()
     } else {
       run_submission("Cutadapt", submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length), "raw reads")
@@ -5133,7 +5181,9 @@ server <- function(input, output, session) {
   })
   observeEvent(input$run_deseq2, {
     if (identical(input$deseq_reference, input$deseq_comparison)) {
-      run_message("Reference and comparison must be different.")
+      msg <- "ERROR: Not submitted. Reference and comparison must be different."
+      run_message(msg)
+      set_tool_message("DESeq2", msg)
       finish_submit_refresh()
     } else {
       run_submission(
@@ -5149,10 +5199,14 @@ server <- function(input, output, session) {
       error = function(e) e
     )
     if (inherits(resolved, "error")) {
-      run_message(paste("ERROR submitting GSEA:", conditionMessage(resolved)))
+      msg <- paste("ERROR submitting GSEA:", conditionMessage(resolved))
+      run_message(msg)
+      set_tool_message("GSEA", msg)
       finish_submit_refresh()
     } else if (identical(resolved$reference, resolved$comparison)) {
-      run_message("Reference and comparison must be different.")
+      msg <- "ERROR: Not submitted. Reference and comparison must be different."
+      run_message(msg)
+      set_tool_message("GSEA", msg)
       finish_submit_refresh()
     } else {
       geneset <- selected_choice(input$gsea_geneset, GSEAPY_GENESET_OPTIONS, "MSigDB_Hallmark_2020")
@@ -5167,6 +5221,9 @@ server <- function(input, output, session) {
   for (step in runnable_pipeline_steps()) {
     local({
       this_step <- step
+      output[[tool_message_output_id(this_step)]] <- renderUI({
+        tool_message_ui(this_step)
+      })
       button_id <- tool_cancel_button_id(this_step)
       confirm_id <- tool_cancel_confirm_id(this_step)
       delete_button_id <- tool_delete_data_button_id(this_step)
@@ -5196,21 +5253,10 @@ server <- function(input, output, session) {
     })
   }
 
-  output$run_message_alert <- renderUI({
-    msg <- trimws(run_message() %||% "")
-    if (!nzchar(msg)) return(NULL)
-    cls <- if (startsWith(msg, "ERROR")) {
-      "error"
-    } else if (startsWith(msg, "Submitting") || grepl("Requested cancellation|Deleting", msg)) {
-      "active"
-    } else {
-      "success"
-    }
-    title <- if (identical(cls, "error")) "Could not submit job" else if (identical(cls, "active")) "Working" else "Submission status"
-    div(class = paste("run-message-alert", cls), tags$strong(title), msg)
+  output$run_output <- renderText({
+    msg <- run_message()
+    if (startsWith(trimws(msg %||% ""), "ERROR")) "" else msg
   })
-
-  output$run_output <- renderText(run_message())
 
   native_results_app <- reactive({
     native_results_refresh()
