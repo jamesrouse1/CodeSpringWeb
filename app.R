@@ -989,11 +989,17 @@ cancel_active_step_jobs <- function(project, step) {
 deleted_status_from_status <- function(status, slurm_state = "", output_bytes = NA_real_) {
   status <- as.character(status %||% "")
   slurm_state <- as.character(slurm_state %||% "")
+  bytes <- suppressWarnings(as.numeric(output_bytes))
+  if (!is.finite(bytes)) bytes <- NA_real_
   failed_states <- c("FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL")
+  active_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
+  completeish_states <- c("COMPLETED", "Finished or not in queue", "No job id", "")
   if (status %in% c("Cancelled") || slurm_state %in% c("CANCELLED", "CANCELLED+", "CA")) return("Cancelled, Deleted")
-  if (status %in% c("Completed")) return("Completed, Deleted")
-  if (status %in% c("Likely failed", "Possibly incomplete", "Running, no growth yet") || slurm_state %in% failed_states) return("Likely failed, Deleted")
-  if (is.finite(suppressWarnings(as.numeric(output_bytes))) && suppressWarnings(as.numeric(output_bytes)) > 0) return("Likely failed, Deleted")
+  if (status %in% c("Completed", "Complete")) return("Completed, Deleted")
+  if (slurm_state %in% failed_states) return("Likely failed, Deleted")
+  if (status %in% c("Running", "Waiting", "Running, no growth yet") || slurm_state %in% active_states) return("Likely failed, Deleted")
+  if (is.finite(bytes) && bytes >= 100 && slurm_state %in% completeish_states) return("Completed, Deleted")
+  if (status %in% c("Likely failed", "Possibly incomplete")) return("Likely failed, Deleted")
   "Likely failed, Deleted"
 }
 
@@ -1016,9 +1022,27 @@ deleted_step_records <- function(project) {
   jobs$step[jobs$step == "Kallisto optional"] <- "Kallisto (optional)"
   jobs$sample <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "sample")
   jobs$deleted_status <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "deleted_status")
+  jobs$previous_status <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "previous_status")
+  jobs$previous_slurm_state <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "previous_slurm_state")
+  jobs$previous_output_bytes <- suppressWarnings(as.numeric(vapply(as.character(jobs$output), extract_output_field, character(1), key = "previous_output_bytes")))
   jobs$deleted_status[!nzchar(jobs$deleted_status)] <- "Likely failed, Deleted"
+  jobs$deleted_status[
+    jobs$deleted_status == "Likely failed, Deleted" &
+      jobs$previous_status %in% c("Completed", "Complete")
+  ] <- "Completed, Deleted"
+  jobs$deleted_status[
+    jobs$deleted_status == "Likely failed, Deleted" &
+      is.finite(jobs$previous_output_bytes) &
+      jobs$previous_output_bytes >= 100 &
+      !jobs$previous_status %in% c("Cancelled", "Running", "Waiting", "Running, no growth yet") &
+      !jobs$previous_slurm_state %in% c("FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL", "CANCELLED", "CANCELLED+", "CA", "PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
+  ] <- "Completed, Deleted"
+  jobs$deleted_status[
+    jobs$deleted_status == "Likely failed, Deleted" &
+      jobs$previous_status %in% c("Cancelled")
+  ] <- "Cancelled, Deleted"
   jobs$deleted_at <- jobs$time %||% ""
-  jobs[, intersect(c("time", "step", "sample", "deleted_status", "deleted_at"), names(jobs)), drop = FALSE]
+  jobs[, intersect(c("time", "step", "sample", "deleted_status", "previous_status", "previous_slurm_state", "previous_output_bytes", "deleted_at"), names(jobs)), drop = FALSE]
 }
 
 latest_deleted_status <- function(project, step, sample = "") {
@@ -1099,7 +1123,10 @@ delete_step_data <- function(project, step) {
     if (NROW(hit)) {
       for (i in seq_len(NROW(hit))) {
         deleted_status <- deleted_status_from_status(hit$status[i], hit$slurm_state[i], hit$output_bytes[i])
-        if (job_error_signal(jobs, step, hit$sample[i]) && !identical(deleted_status, "Cancelled, Deleted")) {
+        if (
+          job_error_signal(jobs, step, hit$sample[i]) &&
+            !deleted_status %in% c("Cancelled, Deleted", "Completed, Deleted")
+        ) {
           deleted_status <- "Likely failed, Deleted"
         }
         save_job(
@@ -1125,7 +1152,10 @@ delete_step_data <- function(project, step) {
     step_row <- step_status[canonical_job_step(step_status$step) == canonical_job_step(step), , drop = FALSE]
     previous_status <- if (NROW(step_row)) step_row$status[1] else ""
     deleted_status <- deleted_status_from_status(previous_status)
-    if (job_error_signal(jobs, step) && !identical(deleted_status, "Cancelled, Deleted")) {
+    if (
+      job_error_signal(jobs, step) &&
+        !deleted_status %in% c("Cancelled, Deleted", "Completed, Deleted")
+    ) {
       deleted_status <- "Likely failed, Deleted"
     }
     save_job(
