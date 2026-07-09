@@ -85,6 +85,8 @@ Review QC, count matrices, DESeq2 results, PCA, volcano plots, heatmaps, and GSE
 
 ![Results explorer QC](docs/assets/results_explorer_qc.png)
 
+![Results explorer heatmap](docs/assets/results_explorer_heatmap.png)
+
 ### Logs And Methods
 
 Browse project logs by tool, sample/run, and output/error type. Export project/reference and tools/reference methods tables.
