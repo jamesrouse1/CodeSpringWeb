@@ -1542,14 +1542,22 @@ parse_log_filename <- function(path) {
 
 log_entries <- function(project) {
   rows <- list()
+  design <- safe_read_table(project$design_matrix_path)
+  design_samples <- if (NROW(design) && "sample" %in% names(design)) as.character(design$sample) else character(0)
+  design_samples <- unique(design_samples[!is.na(design_samples) & nzchar(design_samples)])
+  comparison_tools <- c("DESeq2", "GSEA")
   add_row <- function(tool, log_type, scope, path, label = "") {
     path <- as.character(path %||% "")
     if (!nzchar(path) || !file.exists(path)) return(invisible(NULL))
+    canonical_tool <- canonical_log_tool(tool)
+    scope <- if (nzchar(scope %||% "")) scope else "project"
+    scope_type <- if (scope %in% design_samples && !canonical_tool %in% comparison_tools) "Sample" else "Run"
     rows[[length(rows) + 1]] <<- data.frame(
-      tool = canonical_log_tool(tool),
+      tool = canonical_tool,
       log_type = log_type,
-      scope = if (nzchar(scope %||% "")) scope else "project",
-      label = if (nzchar(label %||% "")) label else paste(canonical_log_tool(tool), log_type, scope),
+      scope_type = scope_type,
+      scope = scope,
+      label = if (nzchar(label %||% "")) label else paste(canonical_tool, log_type, scope),
       path = path,
       stringsAsFactors = FALSE
     )
@@ -1579,18 +1587,19 @@ log_entries <- function(project) {
   }
 
   if (!length(rows)) {
-    return(data.frame(tool = character(), log_type = character(), scope = character(), label = character(), path = character()))
+    return(data.frame(tool = character(), log_type = character(), scope_type = character(), scope = character(), label = character(), path = character()))
   }
   out <- do.call(rbind, rows)
   out <- out[!duplicated(out$path), , drop = FALSE]
   out[order(out$tool, out$scope, out$log_type, out$label), , drop = FALSE]
 }
 
-log_file_choices <- function(project, tool = "All", log_type = "All", scope = "All") {
+log_file_choices <- function(project, tool = "All", log_type = "All", scope_type = "All", scope = "All") {
   entries <- log_entries(project)
   if (!NROW(entries)) return(character(0))
   if (!identical(tool %||% "All", "All")) entries <- entries[entries$tool == tool, , drop = FALSE]
   if (!identical(log_type %||% "All", "All")) entries <- entries[entries$log_type == log_type, , drop = FALSE]
+  if (!identical(scope_type %||% "All", "All") && "scope_type" %in% names(entries)) entries <- entries[entries$scope_type == scope_type, , drop = FALSE]
   if (!identical(scope %||% "All", "All")) entries <- entries[entries$scope == scope, , drop = FALSE]
   if (!NROW(entries)) return(character(0))
   labels <- paste(entries$scope, entries$log_type, basename(entries$path), sep = " - ")
@@ -5006,15 +5015,20 @@ server <- function(input, output, session) {
     type_choices <- c("All", sort(unique(tool_entries$log_type)))
     selected_type <- selected_choice(input$log_type_filter, type_choices, type_choices[[1]])
     type_entries <- if (identical(selected_type, "All")) tool_entries else tool_entries[tool_entries$log_type == selected_type, , drop = FALSE]
-    scope_choices <- c("All", sort(unique(type_entries$scope)))
+    scope_type_choices <- c("All", sort(unique(type_entries$scope_type)))
+    if (selected_tool %in% c("DESeq2", "GSEA")) scope_type_choices <- intersect(scope_type_choices, c("All", "Run"))
+    selected_scope_type <- selected_choice(input$log_scope_type_filter, scope_type_choices, scope_type_choices[[1]])
+    scope_type_entries <- if (identical(selected_scope_type, "All")) type_entries else type_entries[type_entries$scope_type == selected_scope_type, , drop = FALSE]
+    scope_choices <- c("All", sort(unique(scope_type_entries$scope)))
     selected_scope <- selected_choice(input$log_scope_filter, scope_choices, scope_choices[[1]])
-    choices <- log_file_choices(project, selected_tool, selected_type, selected_scope)
-    scope_label <- if (selected_tool %in% c("DESeq2", "GSEA")) "Comparison" else "Sample or run"
+    choices <- log_file_choices(project, selected_tool, selected_type, selected_scope_type, selected_scope)
+    scope_label <- if (identical(selected_scope_type, "Sample")) "Sample" else if (selected_tool %in% c("DESeq2", "GSEA")) "Comparison/run" else "Run"
     controls <- fluidRow(
       column(3, selectInput("log_tool_filter", "Tool", choices = tool_choices, selected = selected_tool, selectize = FALSE)),
       column(2, selectInput("log_type_filter", "Log type", choices = type_choices, selected = selected_type, selectize = FALSE)),
-      column(3, selectInput("log_scope_filter", scope_label, choices = scope_choices, selected = selected_scope, selectize = FALSE)),
-      column(4, if (length(choices)) selectInput("selected_log_file", "Log file", choices = choices, selected = selected_choice(input$selected_log_file, choices, choices[[1]]), selectize = FALSE) else div(class = "empty-box", "No logs match this filter."))
+      column(2, selectInput("log_scope_type_filter", "Scope", choices = scope_type_choices, selected = selected_scope_type, selectize = FALSE)),
+      column(2, selectInput("log_scope_filter", scope_label, choices = scope_choices, selected = selected_scope, selectize = FALSE)),
+      column(3, if (length(choices)) selectInput("selected_log_file", "Log file", choices = choices, selected = selected_choice(input$selected_log_file, choices, choices[[1]]), selectize = FALSE) else div(class = "empty-box", "No logs match this filter."))
     )
     tagList(
       controls,
