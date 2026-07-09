@@ -3391,7 +3391,7 @@ ui <- fluidPage(
                  br(),
                  h4("Sample Progress"),
                  uiOutput("sample_progress_matrix_ui"),
-                div(class = "job-table-wrap", h4("Submitted Jobs"), table_output("active_jobs_table"))),
+                div(class = "job-table-wrap", h4("Submitted Jobs"), uiOutput("progress_job_step_ui"), table_output("active_jobs_table"))),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed. If a path or design matrix check fails before sbatch, the app writes a pre-submit error log instead of submitting an empty job."),
                  uiOutput("run_resource_strip"),
@@ -3400,7 +3400,7 @@ ui <- fluidPage(
                  br(),
                  verbatimTextOutput("run_output")),
         tabPanel("Results Explorer", uiOutput("native_results_ui")),
-        tabPanel("Logs", br(), h3("Submitted Jobs"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text"))),
+        tabPanel("Logs", br(), h3("Submitted Jobs"), uiOutput("logs_job_step_ui"), table_output("jobs_table"), br(), uiOutput("log_file_ui"), tags$pre(class = "log-viewer", textOutput("selected_log_text"))),
         tabPanel("Methods", br(),
                  h3("Methods Documentation"),
                  tags$p(class = "muted", "Project-level methods, reference genome, tool usage, and detected versions where available."),
@@ -3924,9 +3924,20 @@ server <- function(input, output, session) {
     sample_progress_detail_table(sample_progress_state())
   }, page_length = 20, scroll_y = "520px")
 
+  output$progress_job_step_ui <- renderUI({
+    progress_refresh()
+    jobs <- job_history_progress_display(current_project())
+    choices <- job_filter_choices_from_jobs(jobs)
+    selected <- input$progress_job_step %||% "All"
+    if (!selected %in% choices) selected <- "All"
+    selectInput("progress_job_step", "Show submitted jobs for", choices = choices, selected = selected, selectize = FALSE, width = "320px")
+  })
+
   output$active_jobs_table <- render_csl_table({
     progress_refresh()
-    prepare_job_table_for_display(job_history_progress_display(current_project()))
+    jobs <- job_history_progress_display(current_project())
+    filtered <- filter_jobs_by_tool(jobs, input$progress_job_step %||% "All")
+    prepare_job_table_for_display(empty_job_filter_message(filtered, jobs, input$progress_job_step %||% "All"))
   }, page_length = 10, escape = FALSE)
 
   output$run_pipeline_stepper <- renderUI({
@@ -4145,9 +4156,21 @@ server <- function(input, output, session) {
   output$gsea_selected_table <- render_csl_table({ req(input$gsea_file); safe_read_table(input$gsea_file, 5000) }, page_length = 50)
   output$all_file_ui <- renderUI({ progress_refresh(); file_select("all_file", "Result file", current_project()$data_dir, "\\.(txt|csv|tsv|html|png|pdf)$") })
   output$all_file_view <- renderUI({ req(input$all_file); image_or_file_ui(input$all_file) })
+
+  output$logs_job_step_ui <- renderUI({
+    progress_refresh()
+    jobs <- job_history_display(current_project())
+    choices <- job_filter_choices_from_jobs(jobs)
+    selected <- input$logs_job_step %||% "All"
+    if (!selected %in% choices) selected <- "All"
+    selectInput("logs_job_step", "Show submitted jobs for", choices = choices, selected = selected, selectize = FALSE, width = "320px")
+  })
+
   output$jobs_table <- render_csl_table({
     progress_refresh()
-    prepare_job_table_for_display(job_history_display(current_project()))
+    jobs <- job_history_display(current_project())
+    filtered <- filter_jobs_by_tool(jobs, input$logs_job_step %||% "All")
+    prepare_job_table_for_display(empty_job_filter_message(filtered, jobs, input$logs_job_step %||% "All"))
   }, page_length = 50, escape = FALSE)
 
   output$log_file_ui <- renderUI({
@@ -4155,7 +4178,8 @@ server <- function(input, output, session) {
     project <- current_project()
     all_choices <- log_file_choices(project)
     selected_type <- input$log_type_filter %||% "All"
-    choices <- log_file_choices(project, "All", selected_type)
+    selected_tool <- input$logs_job_step %||% "All"
+    choices <- log_file_choices(project, selected_tool, selected_type)
     if (!length(all_choices)) return(div(class = "empty-box", paste("No stdout/stderr log files were found in", file.path(dirname(project$data_dir), "log"))))
     controls <- fluidRow(
       column(3, selectInput("log_type_filter", "Log type", choices = c("All", "output", "error"), selected = selected_type, selectize = FALSE)),
