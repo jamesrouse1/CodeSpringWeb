@@ -6,6 +6,39 @@ It is designed for shared HPC environments where analyses should continue runnin
 
 ![CodeSpringApp project setup](docs/assets/setup_folder_selection.png)
 
+## Run On The Server
+
+Use the launcher script. It checks required packages, clears stale listeners on the chosen port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
+
+Each person should use their own port. If two people try to use `8601` on the same server at the same time, only one app can bind to that port. Pick another open port such as `8602`, `8603`, or `8610`.
+
+On the server:
+
+```bash
+cd ~/CodeSpringApp
+./run_codespringweb.sh 8601
+```
+
+From your laptop:
+
+```bash
+ssh -N -L 8601:localhost:8601 $USER@bamdev1
+```
+
+Then open:
+
+```text
+http://localhost:8601
+```
+
+If your server folder is still named `CodeSpringWeb`, either rename it or run from that folder:
+
+```bash
+mv ~/CodeSpringWeb ~/CodeSpringApp
+cd ~/CodeSpringApp
+./run_codespringweb.sh 8601
+```
+
 ## What It Does
 
 - Creates or resumes CodeSpringLab projects from saved project configs.
@@ -56,51 +89,6 @@ Browse project logs by tool, sample/run, and output/error type. Export project/r
 
 ![Logs](docs/assets/logs.png)
 
-## Static Demo
-
-GitHub cannot run a live Shiny app in a README, but this repo includes a static visual tour that can be published with GitHub Pages:
-
-```text
-docs/index.html
-```
-
-After enabling GitHub Pages for the `docs/` folder, the demo will be available at:
-
-```text
-https://jamesrouse1.github.io/CodeSpringApp/
-```
-
-The static demo is intentionally visual only. The real app still runs on your server because it depends on CodeSpringLab, SLURM, project data, and reference files.
-
-## Run On The Server
-
-Use the launcher script. It installs required R packages into your user library if they are missing, clears stale listeners on the chosen port, starts Shiny in the background, and prints the exact SSH tunnel command for your laptop.
-
-```bash
-cd ~/CodeSpringApp
-./run_codespringweb.sh 8601
-```
-
-From your laptop, run the SSH tunnel printed by the launcher. It will look like this:
-
-```bash
-ssh -N -L 8601:localhost:8601 rouse@bamdev1
-```
-
-Then open:
-
-```text
-http://localhost:8601
-```
-
-If your server folder is still named `CodeSpringWeb`, either rename it or run from that folder:
-
-```bash
-mv ~/CodeSpringWeb ~/CodeSpringApp
-cd ~/CodeSpringApp
-./run_codespringweb.sh 8601
-```
-
 ## Project Discovery
 
 CodeSpringApp discovers existing CodeSpringLab project configs from:
@@ -129,27 +117,6 @@ For new projects, it creates project-local outputs under:
 - `Logs`: inspect tool logs and submit logs.
 - `Methods`: summarize project metadata, tools, versions, references, and parameters.
 
-## Requirements
-
-Required R packages:
-
-```r
-install.packages(c("shiny", "DT", "base64enc", "ggplot2"))
-```
-
-The launcher handles these automatically:
-
-- `DT`: editable, searchable, scrollable tables
-- `base64enc`: embedded logos/images
-- `ggplot2`: publication-style plot support
-
-GSEA runs through the CodeSpringLab Python/GSEApy implementation. On `bamdev1`, the submitted GSEA job loads:
-
-```bash
-module load BSR
-module load Python/3.7.4-GCCcore-8.3.0
-```
-
 ## Job Submission
 
 Run buttons submit jobs through `sbatch`, so jobs are owned by SLURM after submission. Closing the browser or stopping Shiny does not cancel jobs already accepted by SLURM.
@@ -166,49 +133,3 @@ Project logs are written under:
 <results_root>/<project_name>/log/
 ```
 
-## GSEA
-
-GSEA jobs are submitted as Python jobs using CodeSpringLab's existing `bulkRNAseq.gseapy_RunPathway()` function.
-
-The app uses:
-
-- DESeq2 normalized counts from `<project>/data/deseq2`
-- The selected design-matrix comparison column
-- Signal-to-noise ranking
-- Gene-set permutations
-- Seed `8`
-- Enrichr/GMT-style gene-set databases
-- The bundled local mouse-human ortholog table for mouse projects
-
-Outputs are written under database-specific folders:
-
-```text
-<project>/data/gseapy/<comparison>_vs_<reference>/<gene_set_database>/
-```
-
-## Troubleshooting
-
-Check the newest GSEA logs for the selected project:
-
-```bash
-cd ~/csl_results/<project_name>/log
-ls -lhtr *gseapy*.txt
-tail -120 "$(ls -t submit_gseapy_*.txt | head -1)"
-tail -120 "$(ls -t error_gseapy_*.txt | head -1)"
-tail -120 "$(ls -t output_gseapy_*.txt | head -1)"
-```
-
-Check why a SLURM job was cancelled:
-
-```bash
-sacct -j JOBID --format=JobID,JobName,State,ExitCode,Elapsed,Start,End,Reason%50
-scontrol show job JOBID
-```
-
-## Useful Environment Variables
-
-- `CSL_CODESPRINGLAB_ROOT`: path to the CodeSpringLab repo. Default: `~/CodeSpringLab`
-- `CSL_WEB_HOST`: Shiny host binding. Default: `0.0.0.0`
-- `CSL_WEB_LOG_DIR`: launcher log/pid folder. Default: `~/.codespringweb`
-- `CSL_WEB_AUTOKILL_SHINY`: set to `0` to disable startup cleanup of stale Shiny sessions.
-- `CSL_PYTHON_BIN` or `PYTHON_BIN`: optional Python executable override for GSEApy jobs.
