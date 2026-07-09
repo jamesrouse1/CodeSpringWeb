@@ -4705,9 +4705,10 @@ server <- function(input, output, session) {
   output$fastqc_select_ui <- renderUI({
     progress_refresh()
     p <- current_project()
-    files <- c(list.files(file.path(p$data_dir, "fastqc"), pattern = "\\.html$", full.names = TRUE),
-               list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "\\.html$", full.names = TRUE))
-    selectInput("fastqc_file", "FastQC report", choices = files, selected = files[1] %||% character(0), selectize = FALSE)
+    files <- c(list.files(file.path(p$data_dir, "fastqc_cutadapt"), pattern = "\\.html$", full.names = TRUE),
+               list.files(file.path(p$data_dir, "fastqc"), pattern = "\\.html$", full.names = TRUE))
+    if (!length(files)) return(div(class = "empty-box", "No FastQC HTML reports were found yet."))
+    selectInput("fastqc_file", "FastQC report", choices = files, selected = files[[1]], selectize = FALSE)
   })
   output$fastqc_view <- renderUI({ req(input$fastqc_file); image_or_file_ui(input$fastqc_file, "1050px") })
   output$star_summary <- render_csl_table(safe_read_table(file.path(current_project()$data_dir, "star_summary", "summary_matrix.txt")), page_length = 50)
