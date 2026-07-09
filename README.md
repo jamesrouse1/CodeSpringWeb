@@ -1,4 +1,4 @@
-# CodeSpringWeb
+# CodeSpringApp
 
 CodeSpringWeb is a Shiny control center for running and reviewing CodeSpringLab projects from one server port.
 
