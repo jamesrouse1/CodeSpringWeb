@@ -592,7 +592,7 @@ record_preflight_failure <- function(project, step, message, log_name = clean_na
   )
   writeLines(lines, stderr)
   writeLines(c(lines, paste("stderr:", stderr)), submit_log)
-  paste("ERROR:", message, "\nPre-submit error log:", stderr)
+  paste("ERROR: Not submitted.", message, "\nPre-submit error log:", stderr)
 }
 
 safe_read_table <- function(path, n = Inf) {
@@ -3006,7 +3006,7 @@ missing_read_message <- function(project, pairs, trimmed = FALSE) {
   read_base <- if (isTRUE(trimmed)) file.path(project$data_dir, "cutadapt") else project$fastq_dir
   if (!nzchar(read_base %||% "") || !dir.exists(read_base)) {
     return(paste(
-      if (isTRUE(trimmed)) "The trimmed FASTQ folder is missing or does not exist." else "The raw FASTQ folder is missing or does not exist.",
+      if (isTRUE(trimmed)) "Run cutadapt successfully before using trimmed reads. The trimmed FASTQ folder is missing or does not exist." else "The raw FASTQ folder is missing or does not exist.",
       paste("FASTQ folder:", read_base),
       "Choose the correct raw FASTQ folder in project setup, then save/create the project again.",
       sep = "\n"
@@ -3771,6 +3771,12 @@ body { background:#eef3f8; color:#17202f; }
 .tool-right small { color:#657084; }
 .tool-body { padding:0 16px 16px 16px; border-top:1px solid #edf1f6; }
 .tool-body .form-group { margin-bottom:10px; }
+.run-message-alert { margin:12px 0 16px 0; border-radius:8px; padding:13px 15px; border:1px solid #cfd7e3; background:white; color:#304a66; box-shadow:0 1px 2px rgba(15,23,36,0.04); white-space:pre-wrap; overflow-wrap:anywhere; }
+.run-message-alert strong { display:block; margin-bottom:4px; color:#17202f; }
+.run-message-alert.error { background:#fff0ed; border-color:#e5a397; color:#8a2f24; }
+.run-message-alert.error strong { color:#8a2f24; }
+.run-message-alert.success { background:#eefaf3; border-color:#b7dfc7; color:#315f4c; }
+.run-message-alert.active { background:#fff4d6; border-color:#f0c36d; color:#7c3d00; }
 .tool-cancel-zone { margin-top:12px; padding-top:12px; border-top:1px dashed #d8dde8; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .tool-cancel-zone .form-group { margin:0; }
 .tool-cancel-zone label { color:#8a2f24; font-weight:700; }
@@ -4361,6 +4367,7 @@ ui <- fluidPage(
                  verbatimTextOutput("design_save_status")),
         tabPanel("Run Pipeline", br(), h3("Run Pipeline"),
                  tags$p(class = "muted", "Each tool has its own settings. Jobs are submitted with SLURM sbatch and keep running after this app or browser is closed. If a path or design matrix check fails before sbatch, the app writes a pre-submit error log instead of submitting an empty job."),
+                 uiOutput("run_message_alert"),
                  uiOutput("run_resource_strip"),
                  uiOutput("run_pipeline_stepper"),
                  uiOutput("run_step_cards"),
@@ -5144,6 +5151,20 @@ server <- function(input, output, session) {
       }, ignoreInit = TRUE)
     })
   }
+
+  output$run_message_alert <- renderUI({
+    msg <- trimws(run_message() %||% "")
+    if (!nzchar(msg)) return(NULL)
+    cls <- if (startsWith(msg, "ERROR")) {
+      "error"
+    } else if (startsWith(msg, "Submitting") || grepl("Requested cancellation|Deleting", msg)) {
+      "active"
+    } else {
+      "success"
+    }
+    title <- if (identical(cls, "error")) "Could not submit job" else if (identical(cls, "active")) "Working" else "Submission status"
+    div(class = paste("run-message-alert", cls), tags$strong(title), msg)
+  })
 
   output$run_output <- renderText(run_message())
 
