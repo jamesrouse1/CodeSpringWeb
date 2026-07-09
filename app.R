@@ -4326,6 +4326,7 @@ select.form-control {
 
 ui <- fluidPage(
   tags$head(
+    tags$title("CodeSpringApp"),
     tags$style(HTML(app_css)),
     tags$script(HTML("
       function cslFormatElapsed(total) {
@@ -4368,7 +4369,7 @@ ui <- fluidPage(
   div(class = "csl-header",
       div(class = "brand-lockup",
           if (file.exists(LOGO_PATH)) tags$img(src = file.path("codespring_logo", basename(LOGO_PATH))),
-          div(h2("CodeSpringWeb"), div(class = "muted", "Developed by James Rouse, Rad Utama and Alex Dobin (Bioinformatics Shared Resource)"))
+          div(h2("CodeSpringApp"), div(class = "muted", "Developed by James Rouse, Rad Utama and Alex Dobin (Bioinformatics Shared Resource)"))
       ),
       if (file.exists(LOGO_CSL_PATH)) tags$img(src = file.path("csl_logo", basename(LOGO_CSL_PATH)), style = "max-height:120px;max-width:300px;background:white;border-radius:8px;padding:10px;object-fit:contain;")
   ),
@@ -4714,7 +4715,7 @@ server <- function(input, output, session) {
           tags$p(class = "muted", "This folder must contain the FASTQ files named in design_matrix.txt. If this path is wrong, jobs are not submitted and a pre-submit error is written in the Logs tab.")
       ),
       div(class = "new-project-path-control",
-          textInput("new_results_root", "Results root", value = "~/csl_results", placeholder = "Where CodeSpringWeb should write project results"),
+          textInput("new_results_root", "Results root", value = "~/csl_results", placeholder = "Where CodeSpringApp should write project results"),
           actionButton("browse_new_results_root", "Browse server", class = "btn-default")
       ),
       div(class = "new-project-path-control",
