@@ -950,6 +950,71 @@ cancel_active_step_jobs <- function(project, step) {
   msg
 }
 
+deleted_status_from_status <- function(status, slurm_state = "", output_bytes = NA_real_) {
+  status <- as.character(status %||% "")
+  slurm_state <- as.character(slurm_state %||% "")
+  failed_states <- c("FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL")
+  if (status %in% c("Cancelled") || slurm_state %in% c("CANCELLED", "CANCELLED+", "CA")) return("Cancelled, Deleted")
+  if (status %in% c("Completed")) return("Completed, Deleted")
+  if (status %in% c("Likely failed", "Possibly incomplete", "Running, no growth yet") || slurm_state %in% failed_states) return("Likely failed, Deleted")
+  if (is.finite(suppressWarnings(as.numeric(output_bytes))) && suppressWarnings(as.numeric(output_bytes)) > 0) return("Likely failed, Deleted")
+  "Likely failed, Deleted"
+}
+
+deleted_step_records <- function(project) {
+  if (!file.exists(JOBS_PATH)) return(data.frame())
+  jobs <- tryCatch(utils::read.delim(JOBS_PATH, check.names = FALSE, stringsAsFactors = FALSE, fill = TRUE), error = function(e) data.frame())
+  if (!NROW(jobs) || !"project" %in% names(jobs) || !"step" %in% names(jobs) || !"output" %in% names(jobs)) return(data.frame())
+  if ("project_id" %in% names(jobs) && any(nzchar(jobs$project_id %||% ""))) {
+    jobs <- jobs[jobs$project_id == (project$id %||% ""), , drop = FALSE]
+  } else {
+    jobs <- jobs[jobs$project == project$name, , drop = FALSE]
+  }
+  if ("data_dir" %in% names(jobs) && any(nzchar(jobs$data_dir %||% ""))) {
+    jobs <- jobs[!nzchar(jobs$data_dir %||% "") | jobs$data_dir == (project$data_dir %||% ""), , drop = FALSE]
+  }
+  hit <- grepl("data_deleted_by_codespringweb:[[:space:]]*true", as.character(jobs$output), ignore.case = TRUE)
+  jobs <- jobs[hit, , drop = FALSE]
+  if (!NROW(jobs)) return(data.frame())
+  jobs$step[jobs$step == "RSEM optional"] <- "RSEM (optional)"
+  jobs$step[jobs$step == "Kallisto optional"] <- "Kallisto (optional)"
+  jobs$sample <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "sample")
+  jobs$deleted_status <- vapply(as.character(jobs$output), extract_output_field, character(1), key = "deleted_status")
+  jobs$deleted_status[!nzchar(jobs$deleted_status)] <- "Likely failed, Deleted"
+  jobs$deleted_at <- jobs$time %||% ""
+  jobs[, intersect(c("time", "step", "sample", "deleted_status", "deleted_at"), names(jobs)), drop = FALSE]
+}
+
+latest_deleted_status <- function(project, step, sample = "") {
+  rec <- deleted_step_records(project)
+  if (!NROW(rec) || !"step" %in% names(rec) || !"deleted_status" %in% names(rec)) return("")
+  rec <- rec[canonical_job_step(rec$step) == canonical_job_step(step), , drop = FALSE]
+  if (nzchar(sample %||% "") && "sample" %in% names(rec)) {
+    sample_rec <- rec[nzchar(rec$sample) & rec$sample == sample, , drop = FALSE]
+    if (NROW(sample_rec)) rec <- sample_rec
+  }
+  if (!NROW(rec)) return("")
+  tail(as.character(rec$deleted_status), 1)
+}
+
+job_error_signal <- function(jobs, step, sample = "") {
+  if (!NROW(jobs) || !"step" %in% names(jobs)) return(FALSE)
+  hit <- jobs[canonical_job_step(jobs$step) == canonical_job_step(step), , drop = FALSE]
+  if (nzchar(sample %||% "") && "sample" %in% names(hit)) {
+    sample_hit <- hit[nzchar(hit$sample) & hit$sample == sample, , drop = FALSE]
+    if (NROW(sample_hit)) hit <- sample_hit
+  }
+  if (!NROW(hit)) return(FALSE)
+  failed_states <- c("FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL")
+  if ("slurm_state" %in% names(hit) && any(hit$slurm_state %in% failed_states)) return(TRUE)
+  if ("stderr" %in% names(hit)) {
+    err <- as.character(hit$stderr)
+    err <- err[nzchar(err) & file.exists(err)]
+    if (length(err) && any(file.info(err)$size > 0, na.rm = TRUE)) return(TRUE)
+  }
+  FALSE
+}
+
 step_data_paths <- function(project, step) {
   data_dir <- project$data_dir
   counts_dir <- file.path(data_dir, "counts")
@@ -988,6 +1053,58 @@ delete_step_data <- function(project, step) {
   if (any(!inside)) {
     blocked <- paste(normalized[!inside], collapse = "\n")
     return(paste("ERROR: Refusing to delete paths outside the project data folder:", blocked, sep = "\n"))
+  }
+  jobs <- job_history(project)
+  active_states <- active_job_state_map_from_jobs(jobs)
+  progress <- tryCatch(sample_progress(project, active_states, data.frame(), jobs = jobs)$table, error = function(e) data.frame())
+  sample_steps <- sample_level_pipeline_steps()
+  if (canonical_job_step(step) %in% canonical_job_step(sample_steps) && NROW(progress)) {
+    hit <- progress[canonical_job_step(progress$step) == canonical_job_step(step), , drop = FALSE]
+    if (NROW(hit)) {
+      for (i in seq_len(NROW(hit))) {
+        deleted_status <- deleted_status_from_status(hit$status[i], hit$slurm_state[i], hit$output_bytes[i])
+        if (job_error_signal(jobs, step, hit$sample[i]) && !identical(deleted_status, "Cancelled, Deleted")) {
+          deleted_status <- "Likely failed, Deleted"
+        }
+        save_job(
+          project,
+          step,
+          c("delete_step_data", step, hit$sample[i]),
+          paste(
+            c(
+              "data_deleted_by_codespringweb: true",
+              paste("sample:", hit$sample[i]),
+              paste("deleted_status:", deleted_status),
+              paste("previous_status:", hit$status[i]),
+              paste("previous_slurm_state:", hit$slurm_state[i] %||% ""),
+              paste("previous_output_bytes:", hit$output_bytes[i] %||% 0)
+            ),
+            collapse = "\n"
+          )
+        )
+      }
+    }
+  } else {
+    step_status <- project_status(project, jobs = jobs, progress = progress, active_states = active_states)
+    step_row <- step_status[canonical_job_step(step_status$step) == canonical_job_step(step), , drop = FALSE]
+    previous_status <- if (NROW(step_row)) step_row$status[1] else ""
+    deleted_status <- deleted_status_from_status(previous_status)
+    if (job_error_signal(jobs, step) && !identical(deleted_status, "Cancelled, Deleted")) {
+      deleted_status <- "Likely failed, Deleted"
+    }
+    save_job(
+      project,
+      step,
+      c("delete_step_data", step),
+      paste(
+        c(
+          "data_deleted_by_codespringweb: true",
+          paste("deleted_status:", deleted_status),
+          paste("previous_status:", previous_status)
+        ),
+        collapse = "\n"
+      )
+    )
   }
   ok <- unlink(normalized, recursive = TRUE, force = TRUE)
   still_exists <- normalized[file.exists(normalized)]
@@ -1416,7 +1533,8 @@ active_job_state_map_from_jobs <- function(jobs) {
 
 normalize_pipeline_status <- function(status) {
   status <- as.character(status)
-  ifelse(status %in% c("Complete"), "Complete", ifelse(status %in% c("Active"), "Active", ifelse(status %in% c("Cancelled"), "Cancelled", "Not started")))
+  known <- c("Complete", "Active", "Cancelled", "Likely failed", "Completed, Deleted", "Likely failed, Deleted", "Cancelled, Deleted")
+  ifelse(status %in% known, status, "Not started")
 }
 
 status_signature <- function(status) {
@@ -1466,12 +1584,15 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     complete <- completed_project_level_runs(project, step, jobs)
     running <- running_project_level_runs(jobs, step)
     cancelled <- cancelled_project_level_runs(jobs, step)
+    deleted_status <- latest_deleted_status(project, step)
     if (length(complete) && length(running)) running <- drop_running_completed_labels(running, complete)
     pieces <- character(0)
     if (length(running)) pieces <- c(pieces, paste("Running:", paste(running, collapse = "; ")))
     if (length(cancelled)) pieces <- c(pieces, paste("Cancelled:", paste(cancelled, collapse = "; ")))
+    if (nzchar(deleted_status) && !length(complete) && !length(running)) pieces <- c(pieces, deleted_status)
     if (length(complete)) pieces <- c(pieces, paste("Complete:", paste(complete, collapse = "; ")))
     raw$detail[raw$step == step] <- paste(pieces, collapse = " | ")
+    if (nzchar(deleted_status) && !length(complete) && !length(running)) raw$status[raw$step == step] <- deleted_status
     if (length(cancelled)) raw$status[raw$step == step] <- "Cancelled"
     if (length(running)) raw$status[raw$step == step] <- "Active"
   }
@@ -1480,28 +1601,34 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     for (step in c("FastQC", "Cutadapt", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
       hit <- progress[progress$step == step, , drop = FALSE]
       if (!NROW(hit)) next
-      if (any(hit$status == "Cancelled")) {
+      if (any(hit$status == "Likely failed, Deleted")) {
+        raw$status[raw$step == step] <- "Likely failed, Deleted"
+      } else if (any(hit$status == "Cancelled, Deleted")) {
+        raw$status[raw$step == step] <- "Cancelled, Deleted"
+      } else if (all(hit$status %in% c("Completed, Deleted", "Optional, not run")) && any(hit$status == "Completed, Deleted")) {
+        raw$status[raw$step == step] <- "Completed, Deleted"
+      } else if (any(hit$status == "Cancelled")) {
         raw$status[raw$step == step] <- "Cancelled"
       } else if (all(hit$status %in% c("Completed", "Optional, not run")) && any(hit$status == "Completed")) {
         raw$status[raw$step == step] <- "Complete"
       } else if (any(hit$status %in% c("Running", "Running, no growth yet", "Waiting"))) {
         raw$status[raw$step == step] <- "Active"
-      } else if (any(hit$status == "Possibly incomplete")) {
-        raw$status[raw$step == step] <- "Active"
+      } else if (any(hit$status == "Likely failed")) {
+        raw$status[raw$step == step] <- "Likely failed"
       } else {
         raw$status[raw$step == step] <- "Not started"
       }
     }
   }
   active <- names(active_states)
-  raw$status[raw$step %in% active & !raw$status %in% c("Complete", "Cancelled")] <- "Active"
+  raw$status[raw$step %in% active & !raw$status %in% c("Complete", "Cancelled", "Likely failed", "Completed, Deleted", "Likely failed, Deleted", "Cancelled, Deleted")] <- "Active"
   if (!feature_matrix_exists && feature_count_files > 0) raw$status[raw$step == "featureCounts"] <- "Active"
   raw$status <- normalize_pipeline_status(raw$status)
   raw
 }
 
 status_rank <- function(status) {
-  match(status, c("Active", "Cancelled", "Complete", "Not started"), nomatch = 99)
+  match(status, c("Active", "Likely failed", "Cancelled", "Likely failed, Deleted", "Cancelled, Deleted", "Completed, Deleted", "Complete", "Not started"), nomatch = 99)
 }
 
 pipeline_order <- function() {
@@ -1516,8 +1643,21 @@ status_label <- function(status) {
   ifelse(identical(status, "Active"), "In progress", status)
 }
 
+status_css_key <- function(status) {
+  switch(as.character(status %||% ""),
+    "Active" = "active",
+    "Complete" = "complete",
+    "Cancelled" = "cancelled",
+    "Likely failed" = "failed",
+    "Completed, Deleted" = "deleted-complete",
+    "Likely failed, Deleted" = "deleted-failed",
+    "Cancelled, Deleted" = "deleted-cancelled",
+    "not-started"
+  )
+}
+
 status_pill <- function(status) {
-  cls <- switch(status, "Active" = "active", "Complete" = "complete", "Cancelled" = "cancelled", "not-started")
+  cls <- status_css_key(status)
   tags$span(class = paste("status-pill", cls), status_label(status))
 }
 
@@ -1648,14 +1788,21 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       elapsed <- if (NROW(latest_hit) && "elapsed" %in% names(latest_hit)) latest_hit$elapsed[1] else ""
       min_size <- minimum_expected_bytes(step)
       complete_outputs <- length(sizes) > 0 && all(sizes >= min_size)
+      deleted_status <- latest_deleted_status(project, step, sample)
+      deleted_outputs <- nzchar(deleted_status) && size == 0 && !active
+      error_signal <- job_error_signal(jobs, step, sample)
       growing <- active && has_previous && size > previous_size
       optional <- step %in% c("RSEM (optional)", "Kallisto (optional)")
       slurm_running <- active && slurm_state %in% c("RUNNING", "COMPLETING")
       slurm_waiting <- active && slurm_state %in% c("PENDING", "CONFIGURING", "Submitted")
       slurm_complete <- slurm_state %in% completed_job_states
       slurm_cancelled <- slurm_state %in% cancelled_job_states
-      status <- if (slurm_cancelled) {
+      status <- if (deleted_outputs) {
+        deleted_status
+      } else if (slurm_cancelled) {
         "Cancelled"
+      } else if (error_signal && !active && !complete_outputs) {
+        "Likely failed"
       } else if ((complete_outputs || (slurm_complete && size > 0)) && !growing && !slurm_running) {
         "Completed"
       } else if (slurm_running) {
@@ -1669,14 +1816,16 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       } else if (active) {
         "Waiting"
       } else if (size > 0 && size < min_size) {
-        "Possibly incomplete"
+        "Likely failed"
       } else if (optional) {
         "Optional, not run"
       } else {
         "Not started"
       }
-      note <- if (status == "Possibly incomplete") {
-        paste0("Output exists but is smaller than expected (<", min_size, " bytes).")
+      note <- if (status == "Likely failed") {
+        if (error_signal) "A failed SLURM state or non-empty error log was detected for this sample/step." else paste0("Output exists but is smaller than expected (<", min_size, " bytes).")
+      } else if (grepl(", Deleted$", status)) {
+        "Data outputs for this step were deleted after the recorded status."
       } else if (identical(status, "Cancelled")) {
         "SLURM reports this job was cancelled or failed."
       } else if (identical(status, "Running, no growth yet")) {
@@ -2811,7 +2960,7 @@ pipeline_stepper_ui <- function(project, status = NULL) {
     st <- status$status[hit] %||% "Not started"
     mode <- status$input[hit] %||% ""
     detail <- if ("detail" %in% names(status)) status$detail[hit] %||% "" else ""
-    cls <- switch(st, "Complete" = "complete", "Active" = "active", "Cancelled" = "cancelled", "not-started")
+    cls <- status_css_key(st)
     div(class = paste("pipeline-step", cls),
         div(class = "step-index", meta$order[i]),
         div(class = "step-main",
@@ -2825,7 +2974,7 @@ pipeline_stepper_ui <- function(project, status = NULL) {
 tool_panel <- function(step, status, description, controls, button_id, button_label, progress_df = data.frame()) {
   st <- status$status[match(step, status$step)] %||% "Not started"
   mode <- status$input[match(step, status$step)] %||% ""
-  cls <- switch(st, "Complete" = "complete", "Active" = "active", "Cancelled" = "cancelled", "not-started")
+  cls <- status_css_key(st)
   tags$details(
     class = paste("tool-panel", cls),
     open = identical(st, "Active") || identical(st, "Not started"),
@@ -3055,6 +3204,9 @@ body { background:#eef3f8; color:#17202f; }
 .status-pill.active { color:#7c3d00; background:#fff4d6; border:1px solid #f0c36d; }
 .status-pill.complete { color:#0b6b3a; background:#def7e8; border:1px solid #8fd8ad; }
 .status-pill.cancelled { color:#8a2f24; background:#fff0ed; border:1px solid #e5a397; }
+.status-pill.failed { color:#8a2f24; background:#fff0ed; border:1px solid #e5a397; }
+.status-pill.deleted-complete { color:#315f4c; background:#eefaf3; border:1px solid #b7dfc7; }
+.status-pill.deleted-failed, .status-pill.deleted-cancelled { color:#8a2f24; background:#fff0ed; border:1px solid #e5a397; }
 .status-pill.not-started { color:#526070; background:#eef2f7; border:1px solid #cfd7e3; }
 .run-grid { display:grid; grid-template-columns:1fr; gap:12px; margin-top:14px; }
 .run-card p { min-height:38px; margin-bottom:12px; }
@@ -3064,6 +3216,8 @@ body { background:#eef3f8; color:#17202f; }
 .tool-panel.complete { border-left:5px solid #27ae60; }
 .tool-panel.active { border-left:5px solid #d99a15; }
 .tool-panel.cancelled { border-left:5px solid #d55745; }
+.tool-panel.failed, .tool-panel.deleted-failed, .tool-panel.deleted-cancelled { border-left:5px solid #d55745; }
+.tool-panel.deleted-complete { border-left:5px solid #7abf8d; }
 .tool-panel.not-started { border-left:5px solid #d55745; }
 .tool-summary { display:flex; justify-content:space-between; align-items:center; gap:16px; }
 .tool-summary strong { display:block; font-size:16px; }
@@ -3112,6 +3266,8 @@ body { background:#eef3f8; color:#17202f; }
 .pipeline-step.complete { background:#def7e8; border-color:#8fd8ad; }
 .pipeline-step.active { background:#fff4d6; border-color:#f0c36d; }
 .pipeline-step.cancelled { background:#fff0ed; border-color:#e5a397; }
+.pipeline-step.failed, .pipeline-step.deleted-failed, .pipeline-step.deleted-cancelled { background:#fff0ed; border-color:#e5a397; }
+.pipeline-step.deleted-complete { background:#eefaf3; border-color:#b7dfc7; }
 .step-index { width:28px; height:28px; border-radius:50%; background:white; display:flex; align-items:center; justify-content:center; font-weight:700; }
 .step-main { display:flex; flex-direction:column; line-height:1.2; }
 .step-main span, .step-main em { font-size:12px; color:#657084; margin-top:3px; font-style:normal; }
@@ -3131,7 +3287,8 @@ body { background:#eef3f8; color:#17202f; }
 .sample-status.running, .sample-status.running-no-growth-yet { background:#fff4d6; color:#7c3d00; border-color:#f0c36d; }
 .sample-status.waiting { background:#e8f2ff; color:#15549a; border-color:#b9d5f5; }
 .sample-status.cancelled { background:#fff0ed; color:#8a2f24; border-color:#e5a397; }
-.sample-status.possibly-incomplete { background:#fff0ed; color:#9f2d20; border-color:#e5a397; }
+.sample-status.likely-failed, .sample-status.likely-failed-deleted, .sample-status.cancelled-deleted { background:#fff0ed; color:#9f2d20; border-color:#e5a397; }
+.sample-status.completed-deleted { background:#eefaf3; color:#315f4c; border-color:#b7dfc7; }
 .sample-status.optional-not-run { background:#f6f3fb; color:#5d4d79; border-color:#d9d0ea; }
 .project-card { background:white; border:1px solid #d8dde8; border-radius:8px; padding:14px; box-shadow:0 8px 20px rgba(15,23,36,.06); }
 .project-card-top { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:12px; }
@@ -3323,6 +3480,8 @@ body > .container-fluid > .row > .col-sm-10 {
 .pipeline-step.complete { background: #eefaf3; }
 .pipeline-step.active { background: #fff8e6; }
 .pipeline-step.cancelled { background: #fff0ed; }
+.pipeline-step.failed, .pipeline-step.deleted-failed, .pipeline-step.deleted-cancelled { background: #fff0ed; }
+.pipeline-step.deleted-complete { background: #eefaf3; }
 .sample-matrix th {
   background: #10233a;
   color: #fff;
