@@ -285,6 +285,7 @@ cleanup_previous_shiny_processes <- function() {
 
 analysis_label <- function(x) {
   x <- tolower(as.character(x %||% "rna"))
+  if (grepl("cut.?run|cutandrun", x)) return("CUT&RUN")
   if (grepl("atac", x)) return("ATAC-seq")
   if (grepl("chip", x)) return("ChIP-seq")
   "RNA-seq"
@@ -292,13 +293,18 @@ analysis_label <- function(x) {
 
 analysis_key <- function(x) {
   x <- tolower(as.character(x %||% "rna"))
+  if (grepl("cut.?run|cutandrun", x)) return("cutrun")
   if (grepl("atac", x)) return("atac")
   if (grepl("chip", x)) return("chip")
   "rna"
 }
 
 analysis_notebook_dir <- function(key) {
-  switch(analysis_key(key), atac = "bulkATACseq", chip = "bulkChIPseq", rna = "bulkRNAseq")
+  switch(analysis_key(key), atac = "bulkATACseq", chip = "bulkChIPseq", cutrun = "bulkCUTRUNseq", rna = "bulkRNAseq")
+}
+
+is_cutrun_project <- function(project) {
+  identical(analysis_key(project$analysis_key %||% project$analysis), "cutrun")
 }
 
 parse_py_config <- function(path) {
@@ -559,6 +565,22 @@ write_project_config <- function(project) {
     sprintf("genome_version = %s", deparse(genome_reference_key(project))),
     sprintf("pairing = %s", deparse(if (isTRUE(project$paired_end)) "y" else "n"))
   )
+  if (is_cutrun_project(project)) {
+    ref <- cutrun_reference_resources(project)
+    lines <- c(lines,
+      sprintf("bowtie2_index = %s", deparse(ref$bowtie2_index)),
+      sprintf("chrom_sizes = %s", deparse(ref$chrom_sizes)),
+      sprintf("macs2_genome_size = %s", deparse(ref$macs2_genome)),
+      "peakcaller = 'seacr'",
+      "seacr_norm = 'norm'",
+      "seacr_stringency = 'stringent'",
+      "minimum_alignment_q_score = '30'",
+      "max_fragment_length = '1000'",
+      "dedup_target_reads = 'n'",
+      "dedup_control_reads = 'y'",
+      "remove_mitochondrial_reads = 'y'"
+    )
+  }
   writeLines(lines, cfg_path)
   cfg_path
 }
@@ -720,6 +742,12 @@ sync_metadata_columns <- function(df, metadata_cols) {
 design_matrix_columns <- function(df) {
   if (!NROW(df)) return(c("include", "sample", "treatment", "filename", "status"))
   c("include", "sample", setdiff(names(df), c("include", "sample", "filename", "status")), "filename", "status")
+}
+
+default_metadata_cols <- function(project = NULL, analysis = NULL) {
+  key <- if (!is.null(project)) analysis_key(project$analysis_key %||% project$analysis) else analysis_key(analysis %||% "rna")
+  if (identical(key, "cutrun")) return(c("target", "condition", "replicate", "control_sample"))
+  "treatment"
 }
 
 as_design_bool <- function(x) {
@@ -1226,6 +1254,9 @@ sample_step_data_paths <- function(project, step, samples) {
         if (!dir.exists(dir)) character(0) else list.files(dir, pattern = sample_pattern(sample, ".*\\.(fastq|fq)(\\.gz)?$"), full.names = TRUE, ignore.case = TRUE)
       },
       "STAR" = file.path(data_dir, "star", sample),
+      "Bowtie2" = file.path(data_dir, "bowtie2", sample),
+      "SEACR" = file.path(data_dir, "seacr", sample),
+      "MACS2 (optional)" = file.path(data_dir, "macs2", sample),
       "featureCounts" = c(
         file.path(data_dir, "featurecounts", sample),
         file.path(counts_dir, "count_matrix.txt"),
@@ -1255,6 +1286,9 @@ step_data_paths <- function(project, step, samples = NULL) {
     "FastQC" = c(file.path(data_dir, "fastqc"), file.path(data_dir, "fastqc_cutadapt")),
     "Cutadapt" = file.path(data_dir, "cutadapt"),
     "STAR" = file.path(data_dir, "star"),
+    "Bowtie2" = file.path(data_dir, "bowtie2"),
+    "SEACR" = file.path(data_dir, "seacr"),
+    "MACS2 (optional)" = file.path(data_dir, "macs2"),
     "featureCounts" = c(
       file.path(data_dir, "featurecounts"),
       file.path(counts_dir, "count_matrix.txt"),
@@ -1370,6 +1404,9 @@ canonical_job_step <- function(x) {
     fastqc = "FastQC",
     cutadapt = "Cutadapt",
     star = "STAR",
+    bowtie2 = "Bowtie2",
+    seacr = "SEACR",
+    macs2 = "MACS2 (optional)",
     featurecounts = "featureCounts",
     deseq2 = "DESeq2",
     gsea = "GSEA",
@@ -1489,7 +1526,7 @@ project_methods_summary <- function(project) {
       project$label,
       project$analysis,
       genome_species(project),
-      gencode_label(project),
+      project_reference_label(project),
       genome_reference_key(project),
       if (isTRUE(project$paired_end)) "Paired-end" else "Single-end",
       if (file.exists(project$design_matrix_path)) "Provided or created in app" else "Not created yet"
@@ -1535,6 +1572,26 @@ tool_reference_summary <- function(project) {
     file.path(SCRIPTS_DIR, "Kallisto", "kallisto_PE.sh"),
     file.path(SCRIPTS_DIR, "Kallisto", "kallisto_SE.sh")
   ))
+  if (is_cutrun_project(project)) {
+    bowtie2_modules <- module_versions_from_scripts(c(
+      file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_cutrun_PE.sh"),
+      file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_cutrun_SE.sh")
+    ))
+    seacr_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh"), "SEACR_1.3.sh local script; BEDTools/R modules")
+    macs2_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "MACS2", "macs2_cutrun_PE.sh"), "MACS2 module listed in CodeSpringLab script")
+    ref <- cutrun_reference_resources(project)
+    rows <- list(
+      c("Reference", "CUT&RUN genome reference", ref$label, paste0(genome_species(project), " / ", genome_reference_key(project)), "Bowtie2, SEACR, MACS2", paste("Bowtie2 index:", ref$bowtie2_index, "| Chrom sizes:", ref$chrom_sizes)),
+      c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Input mode selected per run; reruns skip completed samples and submit failed/deleted samples only."),
+      c("Tool", "cutadapt", cutadapt_modules, "Adapter trimming", "Raw FASTQ", "Adapter presets or custom adapters from Run Pipeline; minimum length from Run Pipeline."),
+      c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, keep target duplicates, deduplicate IgG/input controls, remove mitochondrial fragments from peak-calling bedGraphs."),
+      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling", "Bowtie2 fragment bedGraphs and optional IgG/input control bedGraph", "Default norm/stringent; controls are selected from control_sample or inferred IgG/input rows."),
+      c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01 and narrow peaks; broad mode available for broad histone marks.")
+    )
+    out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
+    colnames(out) <- c("Type", "Name", "Version/reference", "Used for", "Input/reference", "Parameters/settings")
+    return(out)
+  }
   rows <- list(
     c("Reference", "Genome annotation", gencode_label(project), paste0(genome_species(project), " / ", genome_reference_key(project)), "STAR, featureCounts, DESeq2, RSEM, Kallisto", paste("STAR index, GTF, RSEM index, Kallisto index, and strand BED from", genome_reference_key(project))),
     c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Input mode selected per run; reruns skip completed samples and submit failed/deleted samples only."),
@@ -1561,6 +1618,9 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     step,
     "FastQC" = paste0("Read quality control was performed with FastQC.", mode_text),
     "Cutadapt" = paste0("Adapter trimming was performed with cutadapt.", mode_text),
+    "Bowtie2" = paste0("CUT&RUN fragments were aligned with Bowtie2.", ref_text, mode_text),
+    "SEACR" = paste0("CUT&RUN peaks were called with SEACR from fragment bedGraphs.", ref_text, mode_text),
+    "MACS2 (optional)" = paste0("Optional CUT&RUN peaks were called with MACS2.", ref_text, mode_text),
     "STAR" = paste0("Reads were aligned with STAR using ", gencode_label(project), ".", ref_text, mode_text),
     "featureCounts" = paste0("Gene-level counts were quantified with featureCounts using the selected GTF annotation.", ref_text, mode_text),
     "DESeq2" = paste0("Differential expression analysis was performed with DESeq2.", mode_text),
@@ -1576,12 +1636,12 @@ project_methods_text <- function(project) {
   status <- project_status(project)
   completed <- status$step[status$status == "Complete"]
   run_steps <- if (NROW(manifest) && "step" %in% names(manifest)) unique(as.character(manifest$step)) else character(0)
-  steps <- pipeline_order()[pipeline_order() %in% unique(c(completed, run_steps))]
+  steps <- pipeline_order(project)[pipeline_order(project) %in% unique(c(completed, run_steps))]
   if (!length(steps)) steps <- completed
   lines <- c(
     paste0("Project: ", project$label),
     paste0("Analysis: ", project$analysis),
-    paste0("Reference genome: ", gencode_label(project), " (", genome_reference_key(project), ")."),
+    paste0("Reference genome: ", project_reference_label(project), " (", genome_reference_key(project), ")."),
     paste0("Species: ", genome_species(project), "."),
     paste0("Read type: ", if (isTRUE(project$paired_end)) "paired-end" else "single-end", "."),
     ""
@@ -1837,6 +1897,60 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   design <- project$design_matrix_path
   if (is.null(jobs)) jobs <- job_history(project)
   if (is.null(active_states)) active_states <- active_job_state_map_from_jobs(jobs)
+  if (is_cutrun_project(project)) {
+    raw <- data.frame(
+      step = cutrun_pipeline_order(),
+      status = c(
+        if (file.exists(design)) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "bowtie2"), "Aligned\\.sortedByCoord\\.out\\.bam$") > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "seacr"), "\\.bed$") + count_files(file.path(data_dir, "seacr"), "\\.bedgraph$") > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started"
+      ),
+      path = c(
+        design,
+        file.path(data_dir, "cutadapt"),
+        file.path(data_dir, "fastqc"),
+        file.path(data_dir, "bowtie2"),
+        file.path(data_dir, "seacr"),
+        file.path(data_dir, "macs2")
+      ),
+      stringsAsFactors = FALSE
+    )
+    modes <- last_job_modes_from_jobs(jobs)
+    raw$input <- unname(modes[raw$step])
+    raw$input[is.na(raw$input)] <- ""
+    raw$detail <- ""
+    if (is.null(progress)) progress <- tryCatch(sample_progress(project, active_states, data.frame(), jobs = jobs)$table, error = function(e) data.frame())
+    if (NROW(progress)) {
+      for (step in sample_level_steps_for_project(project)) {
+        hit <- progress[progress$step == step, , drop = FALSE]
+        if (!NROW(hit)) next
+        if (any(hit$status == "Likely failed, Deleted")) {
+          raw$status[raw$step == step] <- "Likely failed, Deleted"
+        } else if (any(hit$status == "Cancelled, Deleted")) {
+          raw$status[raw$step == step] <- "Cancelled, Deleted"
+        } else if (all(hit$status %in% c("Completed, Deleted", "Optional, not run")) && any(hit$status == "Completed, Deleted")) {
+          raw$status[raw$step == step] <- "Completed, Deleted"
+        } else if (any(hit$status == "Cancelled")) {
+          raw$status[raw$step == step] <- "Cancelled"
+        } else if (all(hit$status %in% c("Completed", "Optional, not run")) && any(hit$status == "Completed")) {
+          raw$status[raw$step == step] <- "Complete"
+        } else if (any(hit$status %in% c("Running", "Running, no growth yet", "Waiting"))) {
+          raw$status[raw$step == step] <- "Active"
+        } else if (any(hit$status == "Likely failed")) {
+          raw$status[raw$step == step] <- "Likely failed"
+        } else {
+          raw$status[raw$step == step] <- "Not started"
+        }
+      }
+    }
+    active <- names(active_states)
+    raw$status[raw$step %in% active & !raw$status %in% c("Complete", "Cancelled", "Likely failed", "Completed, Deleted", "Likely failed, Deleted", "Cancelled, Deleted")] <- "Active"
+    raw$status <- normalize_pipeline_status(raw$status)
+    return(raw)
+  }
   feature_count_files <- count_files(file.path(data_dir, "featurecounts"), "_counts\\.txt$")
   feature_matrix_exists <- file.exists(file.path(data_dir, "counts", "count_matrix.txt"))
   raw <- data.frame(
@@ -1923,12 +2037,25 @@ status_rank <- function(status) {
   match(status, c("Active", "Likely failed", "Cancelled", "Likely failed, Deleted", "Cancelled, Deleted", "Completed, Deleted", "Complete", "Not started"), nomatch = 99)
 }
 
-pipeline_order <- function() {
+rna_pipeline_order <- function() {
   c("Design matrix", "Cutadapt", "FastQC", "STAR", "featureCounts", "DESeq2", "GSEA", "RSEM (optional)", "Kallisto (optional)")
 }
 
+cutrun_pipeline_order <- function() {
+  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "MACS2 (optional)")
+}
+
+all_pipeline_steps <- function() {
+  unique(c(rna_pipeline_order(), cutrun_pipeline_order()))
+}
+
+pipeline_order <- function(project = NULL) {
+  if (!is.null(project) && is_cutrun_project(project)) return(cutrun_pipeline_order())
+  rna_pipeline_order()
+}
+
 step_order <- function(step) {
-  match(step, pipeline_order(), nomatch = length(pipeline_order()) + seq_along(step))
+  match(step, all_pipeline_steps(), nomatch = length(all_pipeline_steps()) + seq_along(step))
 }
 
 status_label <- function(status) {
@@ -1990,6 +2117,41 @@ sample_step_targets <- function(project, sample, step) {
     if (length(trimmed) && all(file.exists(trimmed))) return(trimmed)
     return(if (length(raw)) raw else trimmed)
   }
+  if (is_cutrun_project(project)) {
+    return(switch(step,
+      "Cutadapt" = {
+        cutadapt_dir <- file.path(data_dir, "cutadapt")
+        pairs <- sample_fastq_pairs(project, FALSE)
+        hit <- pairs[pairs$sample == sample, , drop = FALSE]
+        expected <- character(0)
+        if (NROW(hit)) {
+          reads <- unique(c(hit$r1[1], if (project$paired_end) hit$r2[1] else character(0)))
+          expected <- file.path(cutadapt_dir, basename(reads))
+          if (length(expected) && all(file.exists(expected))) return(expected)
+        }
+        hits <- if (dir.exists(cutadapt_dir)) {
+          list.files(cutadapt_dir, pattern = paste0("^", sample, ".*", fastq_suffix_regex), full.names = TRUE, ignore.case = TRUE)
+        } else character(0)
+        needed <- if (isTRUE(project$paired_end)) 2 else 1
+        if (length(hits) >= needed) return(sort(hits))
+        if (length(expected)) expected else file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
+      },
+      "Bowtie2" = file.path(data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord.out.bam")),
+      "SEACR" = {
+        hits <- if (dir.exists(file.path(data_dir, "seacr", sample))) {
+          list.files(file.path(data_dir, "seacr", sample), pattern = "\\.bed$", full.names = TRUE)
+        } else character(0)
+        if (length(hits)) hits else file.path(data_dir, "seacr", sample, paste0(sample, ".stringent.bed"))
+      },
+      "MACS2 (optional)" = {
+        hits <- if (dir.exists(file.path(data_dir, "macs2", sample))) {
+          list.files(file.path(data_dir, "macs2", sample), pattern = "(narrowPeak|broadPeak|peaks\\.xls)$", full.names = TRUE)
+        } else character(0)
+        if (length(hits)) hits else file.path(data_dir, "macs2", sample, paste0(sample, "_peaks.narrowPeak"))
+      },
+      character(0)
+    ))
+  }
   switch(step,
     "Cutadapt" = {
       cutadapt_dir <- file.path(data_dir, "cutadapt")
@@ -2021,6 +2183,9 @@ minimum_expected_bytes <- function(step) {
     "FastQC" = 1000,
     "Cutadapt" = 100,
     "STAR" = 1000,
+    "Bowtie2" = 1000,
+    "SEACR" = 10,
+    "MACS2 (optional)" = 10,
     "RSEM (optional)" = 100,
     "Kallisto (optional)" = 100,
     "featureCounts" = 100,
@@ -2134,6 +2299,7 @@ sample_step_metrics <- function(project, sample, step, jobs) {
   switch(step,
     "Cutadapt" = extract_cutadapt_metrics(project, sample, jobs),
     "STAR" = extract_star_metrics(project, sample),
+    "Bowtie2" = extract_bowtie2_metrics(project, sample),
     "featureCounts" = extract_featurecounts_metrics(project, sample),
     c()
   )
@@ -2142,7 +2308,7 @@ sample_step_metrics <- function(project, sample, step, jobs) {
 sample_progress <- function(project, active_states = active_job_state_map(project), previous_cache = data.frame(), jobs = NULL) {
   design <- safe_read_table(project$design_matrix_path)
   if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
-  sample_steps <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+  sample_steps <- sample_level_steps_for_project(project)
   if (is.null(jobs)) jobs <- job_history(project)
   active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
   completed_job_states <- c("COMPLETED", "COMPLETED+", "CD")
@@ -2266,7 +2432,7 @@ status_class <- function(status) {
 
 sample_progress_matrix_ui <- function(progress_df) {
   if (!NROW(progress_df)) return(div(class = "empty-box", "No sample progress available yet."))
-  steps <- c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+  steps <- unique(progress_df$step[order(step_order(progress_df$step))])
   samples <- unique(progress_df$sample)
   if (length(samples) > SAMPLE_PROGRESS_NICE_LIMIT) {
     return(div(
@@ -2370,11 +2536,17 @@ tool_delete_data_samples_id <- function(step) {
 }
 
 sample_level_pipeline_steps <- function() {
-  c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+  unique(c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)", "Bowtie2", "SEACR", "MACS2 (optional)"))
 }
 
-runnable_pipeline_steps <- function() {
-  setdiff(pipeline_order(), "Design matrix")
+sample_level_steps_for_project <- function(project) {
+  if (is_cutrun_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "SEACR", "MACS2 (optional)")
+  else c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+}
+
+runnable_pipeline_steps <- function(project = NULL) {
+  if (is.null(project)) return(setdiff(all_pipeline_steps(), "Design matrix"))
+  setdiff(pipeline_order(project), "Design matrix")
 }
 
 selected_choice <- function(value, choices, default = NULL) {
@@ -2494,7 +2666,7 @@ optimistic_step_progress <- function(project, step, input_mode = "") {
 optimistic_status <- function(current_status, step, input_mode = "") {
   if (!NROW(current_status)) {
     current_status <- data.frame(
-      step = pipeline_order(),
+      step = all_pipeline_steps(),
       status = "Not started",
       path = "",
       input = "",
@@ -2657,6 +2829,29 @@ genome_resources <- function(project) {
   species <- genome_species(project)
   ref <- genome_reference_key(project)
   genome_reference_catalog()[[species]][[ref]]
+}
+
+cutrun_reference_resources <- function(project) {
+  species <- genome_species(project)
+  if (identical(species, "human")) {
+    list(
+      label = "Human hg38 / GENCODE legacy Bowtie2 CUT&RUN reference",
+      bowtie2_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/hg38_p13_gencode_bowtie2index/hg38_p13_gencode",
+      chrom_sizes = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/hg38.chrom.sizes",
+      macs2_genome = "hs"
+    )
+  } else {
+    list(
+      label = "Mouse GRCm39 / GENCODE M29 Bowtie2 CUT&RUN reference",
+      bowtie2_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/GRCm39_M29_gencode_bowtie2index/GRCm39_M29_gencode",
+      chrom_sizes = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/mm39.chrom.sizes",
+      macs2_genome = "mm"
+    )
+  }
+}
+
+project_reference_label <- function(project) {
+  if (is_cutrun_project(project)) cutrun_reference_resources(project)$label else gencode_label(project)
 }
 
 adapter_choices_r1 <- function() {
@@ -3202,6 +3397,175 @@ submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
   paste(append_plan_message(messages, plan), collapse = "\n")
 }
 
+cutrun_design <- function(project) {
+  design <- safe_read_table(project$design_matrix_path)
+  if (!NROW(design)) return(design)
+  if (!"sample" %in% names(design)) names(design)[1] <- "sample"
+  if ("include" %in% names(design)) {
+    design <- design[vapply(design$include, as_design_bool, logical(1)), , drop = FALSE]
+  }
+  for (col in c("target", "condition", "replicate", "control_sample")) {
+    if (!col %in% names(design)) design[[col]] <- ""
+  }
+  design
+}
+
+cutrun_control_like <- function(x) {
+  grepl("igg|input|control", tolower(as.character(x %||% "")))
+}
+
+cutrun_target_design <- function(project, include_controls = FALSE) {
+  design <- cutrun_design(project)
+  if (!NROW(design)) return(design)
+  if (isTRUE(include_controls)) return(design)
+  design[!cutrun_control_like(design$target), , drop = FALSE]
+}
+
+cutrun_control_sample_for <- function(project, sample) {
+  design <- cutrun_design(project)
+  if (!NROW(design) || !sample %in% design$sample) return("")
+  row <- design[design$sample == sample, , drop = FALSE][1, , drop = FALSE]
+  explicit <- trimws(as.character(row$control_sample %||% ""))
+  if (nzchar(explicit) && explicit %in% design$sample) return(explicit)
+  controls <- design[cutrun_control_like(design$target), , drop = FALSE]
+  if (!NROW(controls)) return("")
+  same_condition <- controls[trimws(as.character(controls$condition)) == trimws(as.character(row$condition)), , drop = FALSE]
+  if (NROW(same_condition)) return(as.character(same_condition$sample[1]))
+  as.character(controls$sample[1])
+}
+
+cutrun_bowtie2_bam <- function(project, sample) {
+  file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord.out.bam"))
+}
+
+cutrun_bowtie2_bedgraph <- function(project, sample) {
+  file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_fragments.raw.bedgraph"))
+}
+
+cutrun_missing_bowtie2_message <- function(project, step = "this step") {
+  active_msg <- active_upstream_message(project, "Bowtie2", step)
+  if (nzchar(active_msg)) return(active_msg)
+  design <- cutrun_design(project)
+  if (!NROW(design)) return("No samples found in design_matrix.txt. Create or fix the design matrix before running CUT&RUN peak calling.")
+  files <- file.path(project$data_dir, "bowtie2", as.character(design$sample), paste0(as.character(design$sample), "_fragments.raw.bedgraph"))
+  missing <- files[!file.exists(files) | vapply(files, file_size_for, numeric(1)) <= 0]
+  if (length(missing)) {
+    return(paste(c(
+      paste("Run Bowtie2 successfully before", step, "so fragment bedGraphs exist for all target/control samples."),
+      "Missing or empty files:",
+      missing
+    ), collapse = "\n"))
+  }
+  ""
+}
+
+extract_bowtie2_metrics <- function(project, sample) {
+  summary_path <- file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_cutrun_alignment_summary.txt"))
+  lines <- read_metric_lines(summary_path)
+  if (!length(lines)) return(c(`Mapped reads` = "", `Alignment rate` = ""))
+  one <- function(key) {
+    hit <- grep(paste0("^", key, "\\t"), lines, value = TRUE)
+    if (!length(hit)) return("")
+    strsplit(hit[[1]], "\t", fixed = TRUE)[[1]][2] %||% ""
+  }
+  c(`Mapped reads` = one("mapped_reads"), `Alignment rate` = one("overall_alignment_rate"))
+}
+
+submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_fragment = 1000,
+                                       dedup_target = FALSE, dedup_control = TRUE, remove_mito = TRUE) {
+  res <- cutrun_reference_resources(project)
+  outdir <- file.path(project$data_dir, "bowtie2")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  pairs <- sample_fastq_pairs(project, trimmed)
+  msg <- missing_read_message(project, pairs, trimmed)
+  if (nzchar(msg)) return(record_preflight_failure(project, "Bowtie2", msg, "bowtie2"))
+  target_list <- lapply(split(seq_len(NROW(pairs)), pairs$sample), function(idx) {
+    sample <- pairs$sample[idx[[1]]]
+    cutrun_bowtie2_bam(project, sample)
+  })
+  plan <- sample_submission_plan(project, "Bowtie2", target_list)
+  if (!length(plan$samples)) return(plan$message)
+  pairs <- pairs[pairs$sample %in% plan$samples, , drop = FALSE]
+  script <- file.path(SCRIPTS_DIR, "bowtie2", if (project$paired_end) "qsub_bowtie2_cutrun_PE.sh" else "qsub_bowtie2_cutrun_SE.sh")
+  design <- cutrun_design(project)
+  input_mode <- if (trimmed) "trimmed reads" else "raw reads"
+  messages <- apply(pairs, 1, function(row) {
+    sample <- row[["sample"]]
+    sample_dir <- file.path(outdir, sample)
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    target <- cutrun_bowtie2_bam(project, sample)
+    target_row <- design[design$sample == sample, , drop = FALSE]
+    is_control <- NROW(target_row) && cutrun_control_like(target_row$target[1])
+    dedup_mode <- if ((is_control && isTRUE(dedup_control)) || (!is_control && isTRUE(dedup_target))) "dedup" else "keepdup"
+    remove_mito_arg <- if (isTRUE(remove_mito)) "y" else "n"
+    submit_sbatch(
+      project, "Bowtie2", script,
+      c(file.path(sample_dir, sample), res$bowtie2_index, row[["r1"]], row[["r2"]], res$chrom_sizes, project$name, mapq, max_fragment, dedup_mode, remove_mito_arg),
+      "bowtie2", input_mode, sample = sample, target = target, reference = res$label
+    )
+  })
+  paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "stringent") {
+  msg <- cutrun_missing_bowtie2_message(project, "SEACR")
+  if (nzchar(msg)) return(record_preflight_failure(project, "SEACR", msg, "seacr"))
+  outdir <- file.path(project$data_dir, "seacr")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  design <- cutrun_target_design(project, include_controls = FALSE)
+  if (!NROW(design)) return(record_preflight_failure(project, "SEACR", "No non-control CUT&RUN target samples were found. Fill the target column and avoid labeling every row as IgG/input/control.", "seacr"))
+  target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) {
+    hits <- if (dir.exists(file.path(outdir, sample))) list.files(file.path(outdir, sample), pattern = "\\.bed$", full.names = TRUE) else character(0)
+    if (length(hits)) hits else file.path(outdir, sample, paste0(sample, ".", stringency, ".bed"))
+  }), as.character(design$sample))
+  plan <- sample_submission_plan(project, "SEACR", target_list)
+  if (!length(plan$samples)) return(plan$message)
+  design <- design[design$sample %in% plan$samples, , drop = FALSE]
+  script <- file.path(SCRIPTS_DIR, "SEACR", "qsub_seacr_cutrun.sh")
+  messages <- vapply(as.character(design$sample), function(sample) {
+    sample_dir <- file.path(outdir, sample)
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    control <- cutrun_control_sample_for(project, sample)
+    control_bdg <- if (nzchar(control)) cutrun_bowtie2_bedgraph(project, control) else "none"
+    target <- file.path(sample_dir, paste0(sample, ".", stringency, ".bed"))
+    submit_sbatch(
+      project, "SEACR", script,
+      c(cutrun_bowtie2_bedgraph(project, sample), control_bdg, norm, stringency, file.path(sample_dir, sample), project$name),
+      "seacr", paste(norm, stringency), sample = sample, target = target, reference = "SEACR local script"
+    )
+  }, character(1))
+  paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "narrow") {
+  msg <- cutrun_missing_bowtie2_message(project, "MACS2")
+  if (nzchar(msg)) return(record_preflight_failure(project, "MACS2 (optional)", msg, "macs2"))
+  res <- cutrun_reference_resources(project)
+  outdir <- file.path(project$data_dir, "macs2")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  design <- cutrun_target_design(project, include_controls = FALSE)
+  if (!NROW(design)) return(record_preflight_failure(project, "MACS2 (optional)", "No non-control CUT&RUN target samples were found. Fill the target column and avoid labeling every row as IgG/input/control.", "macs2"))
+  target_suffix <- if (identical(tolower(peak_type), "broad")) "_peaks.broadPeak" else "_peaks.narrowPeak"
+  target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) file.path(outdir, sample, paste0(sample, target_suffix))), as.character(design$sample))
+  plan <- sample_submission_plan(project, "MACS2 (optional)", target_list)
+  if (!length(plan$samples)) return(plan$message)
+  design <- design[design$sample %in% plan$samples, , drop = FALSE]
+  script <- file.path(SCRIPTS_DIR, "MACS2", "qsub_macs2_cutrun_PE.sh")
+  messages <- vapply(as.character(design$sample), function(sample) {
+    sample_dir <- file.path(outdir, sample)
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    control <- cutrun_control_sample_for(project, sample)
+    control_bam <- if (nzchar(control)) cutrun_bowtie2_bam(project, control) else "none"
+    target <- file.path(sample_dir, paste0(sample, target_suffix))
+    submit_sbatch(
+      project, "MACS2 (optional)", script,
+      c(sample, cutrun_bowtie2_bam(project, sample), control_bam, res$macs2_genome, qvalue, tolower(peak_type), sample_dir, project$name),
+      "macs2", paste(tolower(peak_type), "q", qvalue), sample = sample, target = target, reference = res$macs2_genome
+    )
+  }, character(1))
+  paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
 submit_star_jobs <- function(project, trimmed = FALSE) {
   res <- genome_resources(project)
   outdir <- file.path(project$data_dir, "star")
@@ -3708,11 +4072,19 @@ load_native_rnaseq_viewer <- function(project) {
   )
 }
 
-run_step_meta <- function() {
-  data.frame(
-    order = seq_along(pipeline_order()),
-    step = pipeline_order(),
-    description = c(
+run_step_meta <- function(project = NULL) {
+  steps <- pipeline_order(project)
+  descriptions <- if (!is.null(project) && is_cutrun_project(project)) {
+    c(
+      "Create or load design_matrix.txt.",
+      "Trim adapters and short reads.",
+      "Generate per-read quality reports.",
+      "Align fragments with Bowtie2 and create BAM/bedGraph/bigWig outputs.",
+      "Call sparse CUT&RUN peaks with SEACR.",
+      "Optional MACS2 peak calling for comparison or broad histone marks."
+    )
+  } else {
+    c(
       "Create or load design_matrix.txt.",
       "Trim adapters and short reads.",
       "Generate per-read quality reports.",
@@ -3722,14 +4094,19 @@ run_step_meta <- function() {
       "Run pathway analysis.",
       "Optional RSEM quantification from STAR BAM/transcriptome outputs.",
       "Optional Kallisto transcript quantification from raw or trimmed reads."
-    ),
+    )
+  }
+  data.frame(
+    order = seq_along(steps),
+    step = steps,
+    description = descriptions,
     stringsAsFactors = FALSE
   )
 }
 
 pipeline_stepper_ui <- function(project, status = NULL) {
   if (is.null(status) || !NROW(status)) status <- project_status(project)
-  meta <- run_step_meta()
+  meta <- run_step_meta(project)
   div(class = "pipeline-stepper", lapply(seq_len(NROW(meta)), function(i) {
     hit <- match(meta$step[i], status$step)
     st <- status$status[hit] %||% "Not started"
@@ -4566,7 +4943,7 @@ ui <- fluidPage(
     sidebarPanel(
       class = "web-sidebar",
       width = 2,
-      selectInput("analysis", "Analysis", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = "RNA-seq", selectize = FALSE),
+      selectInput("analysis", "Analysis", choices = c("RNA-seq", "CUT&RUN", "ATAC-seq", "ChIP-seq"), selected = "RNA-seq", selectize = FALSE),
       uiOutput("project_ui"),
       uiOutput("new_project_ui"),
       uiOutput("project_manage_ui"),
@@ -4722,6 +5099,7 @@ server <- function(input, output, session) {
     step <- switch(label,
       "RSEM" = "RSEM (optional)",
       "Kallisto" = "Kallisto (optional)",
+      "MACS2" = "MACS2 (optional)",
       "GSEApy" = "GSEA",
       label
     )
@@ -4894,7 +5272,7 @@ server <- function(input, output, session) {
       tags$hr(),
       h4("New Project"),
       textInput("new_project_name", "Project name", value = "", placeholder = "e.g. my_project"),
-      selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "ATAC-seq", "ChIP-seq"), selected = input$analysis, selectize = FALSE),
+      selectInput("new_project_analysis", "Analysis type", choices = c("RNA-seq", "CUT&RUN", "ATAC-seq", "ChIP-seq"), selected = input$analysis, selectize = FALSE),
       selectInput("new_species", "Species", choices = c("Mouse" = "mouse", "Human" = "human"), selected = "mouse", selectize = FALSE),
       uiOutput("new_genome_version_ui"),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
@@ -4962,10 +5340,12 @@ server <- function(input, output, session) {
     native_registered_id("")
     native_results_loaded_project("")
     p <- current_project()
+    updateTextInput(session, "metadata_cols", value = paste(default_metadata_cols(p), collapse = ", "))
     if (cutadapt_outputs_available(p)) {
       updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "kallisto_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "cutrun_bowtie2_use_trimmed", value = TRUE)
     }
     safe_refresh_progress_now("project switch")
   }, ignoreInit = FALSE)
@@ -4983,7 +5363,7 @@ server <- function(input, output, session) {
         ),
         div(class = "project-meta-row",
             span(class = "meta-chip", paste("Species", genome_species(p))),
-            span(class = "meta-chip ref-chip", gencode_label(p)),
+            span(class = "meta-chip ref-chip", project_reference_label(p)),
             span(class = "meta-chip", if (isTRUE(p$paired_end)) "Paired-end" else "Single-end")
         ),
         div(class = "path-list compact-path-list",
@@ -4996,7 +5376,7 @@ server <- function(input, output, session) {
     p <- current_project()
     data.frame(
       field = c("Project", "Analysis", "Species", "Genome/reference", "Reference key", "Paired-end", "Results root", "Data folder", "FASTQ folder", "Design matrix"),
-      value = c(p$label, p$analysis, genome_species(p), gencode_label(p), genome_reference_key(p), as.character(p$paired_end), p$results_root, p$data_dir, p$fastq_dir, p$design_matrix_path),
+      value = c(p$label, p$analysis, genome_species(p), project_reference_label(p), genome_reference_key(p), as.character(p$paired_end), p$results_root, p$data_dir, p$fastq_dir, p$design_matrix_path),
       stringsAsFactors = FALSE
     )
   })
@@ -5095,7 +5475,7 @@ server <- function(input, output, session) {
   metadata_cols_from_input <- reactive({
     cols <- clean_name(unlist(strsplit(input$metadata_cols %||% "", ",")))
     cols <- cols[nzchar(cols) & !cols %in% c("sample", "filename", "include", "status")]
-    if (!length(cols)) cols <- "treatment"
+    if (!length(cols)) cols <- default_metadata_cols(current_project())
     unique(cols)
   })
 
@@ -5126,7 +5506,11 @@ server <- function(input, output, session) {
 
   output$design_editor_ui <- renderUI({
     df <- design_state()
-    if (!NROW(df)) df <- data.frame(include = logical(), sample = character(), treatment = character(), filename = character(), status = character())
+    if (!NROW(df)) {
+      df <- data.frame(include = logical(), sample = character(), filename = character(), status = character())
+      for (col in default_metadata_cols(current_project())) df[[col]] <- character()
+      df <- df[, design_matrix_columns(df), drop = FALSE]
+    }
     design_matrix_ui(df)
   })
 
@@ -5206,11 +5590,13 @@ server <- function(input, output, session) {
 
   output$run_resource_strip <- renderUI({
     p <- current_project()
+    ref <- if (is_cutrun_project(p)) cutrun_reference_resources(p) else genome_resources(p)
     div(class = "resource-strip",
         div(class = "resource-card",
             tags$strong("Genome resources"),
-            tags$p(class = "muted status-path", gencode_label(p)),
-            tags$p(class = "status-path", genome_resources(p)$gtf)
+            tags$p(class = "muted status-path", project_reference_label(p)),
+            tags$p(class = "status-path", if (is_cutrun_project(p)) ref$bowtie2_index else ref$gtf),
+            if (is_cutrun_project(p)) tags$p(class = "status-path", ref$chrom_sizes) else NULL
         ),
         div(class = "resource-card flowchart-card",
             if (file.exists(FLOWCHART_PATH)) tags$img(src = file.path("codespring_flowchart", basename(FLOWCHART_PATH))) else tags$p("Pipeline flowchart")
@@ -5226,6 +5612,45 @@ server <- function(input, output, session) {
     status <- status[order(step_order(status$step)), , drop = FALSE]
     r1_choices <- adapter_choices_r1()
     r2_choices <- adapter_choices_r2()
+    if (is_cutrun_project(p)) {
+      return(div(class = "run-grid",
+        tool_panel("Cutadapt", status, "Trim adapters and short reads from raw CUT&RUN FASTQs.",
+          tagList(
+            selectInput("cutadapt_adapter1", "R1/read1 adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, r1_choices[[1]]), width = "100%", selectize = FALSE),
+            conditionalPanel("input.cutadapt_adapter1 == '__custom__'", textInput("cutadapt_adapter1_custom", "Custom R1/read1 adapter sequence", value = input$cutadapt_adapter1_custom %||% "", width = "100%")),
+            selectInput("cutadapt_adapter2", "R2/read2 adapter", choices = r2_choices, selected = selected_choice(input$cutadapt_adapter2, r2_choices, r2_choices[[1]]), width = "100%", selectize = FALSE),
+            conditionalPanel("input.cutadapt_adapter2 == '__custom__'", textInput("cutadapt_adapter2_custom", "Custom R2/read2 adapter sequence", value = input$cutadapt_adapter2_custom %||% "", width = "100%")),
+            textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
+          ),
+          "run_cutadapt", "Submit cutadapt"),
+        tool_panel("FastQC", status, "Quality reports for raw or trimmed CUT&RUN reads.",
+          tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$fastqc_use_trimmed)))),
+          "run_fastqc", "Submit FastQC"),
+        tool_panel("Bowtie2", status, "Align CUT&RUN fragments with Bowtie2 and generate fragment bedGraph/bigWig tracks.",
+          tagList(
+            checkboxInput("cutrun_bowtie2_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$cutrun_bowtie2_use_trimmed))),
+            textInput("cutrun_mapq", "Minimum alignment MAPQ", value = input$cutrun_mapq %||% "30"),
+            textInput("cutrun_max_fragment", "Maximum fragment length", value = input$cutrun_max_fragment %||% "1000"),
+            checkboxInput("cutrun_dedup_targets", "Deduplicate target reads", value = isTRUE(input$cutrun_dedup_targets)),
+            checkboxInput("cutrun_dedup_controls", "Deduplicate IgG/input controls", value = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls)),
+            checkboxInput("cutrun_remove_mito", "Remove mitochondrial fragments from peak-calling bedGraph", value = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito))
+          ),
+          "run_cutrun_bowtie2", "Submit Bowtie2"),
+        tool_panel("SEACR", status, "Recommended sparse CUT&RUN peak calling from fragment bedGraphs.",
+          tagList(
+            selectInput("cutrun_seacr_norm", "SEACR normalization", choices = c("norm", "non"), selected = selected_choice(input$cutrun_seacr_norm, c("norm", "non"), "norm"), selectize = FALSE),
+            selectInput("cutrun_seacr_stringency", "SEACR stringency", choices = c("stringent", "relaxed"), selected = selected_choice(input$cutrun_seacr_stringency, c("stringent", "relaxed"), "stringent"), selectize = FALSE),
+            tags$p(class = "muted small-note", "Controls are read from the design matrix control_sample column. If blank, the app tries an IgG/input/control row from the same condition.")
+          ),
+          "run_cutrun_seacr", "Submit SEACR"),
+        tool_panel("MACS2 (optional)", status, "Optional MACS2 peak calling for comparison or broad histone-mark peaks.",
+          tagList(
+            textInput("cutrun_macs2_qvalue", "MACS2 q-value cutoff", value = input$cutrun_macs2_qvalue %||% "0.01"),
+            selectInput("cutrun_macs2_peak_type", "Peak type", choices = c("narrow", "broad"), selected = selected_choice(input$cutrun_macs2_peak_type, c("narrow", "broad"), "narrow"), selectize = FALSE)
+          ),
+          "run_cutrun_macs2", "Submit MACS2")
+      ))
+    }
     div(class = "run-grid",
       tool_panel("Cutadapt", status, "Trim adapters and short reads from raw FASTQs.",
         tagList(
@@ -5263,7 +5688,7 @@ server <- function(input, output, session) {
     )
   })
 
-  for (step in c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")) {
+  for (step in runnable_pipeline_steps()) {
     local({
       this_step <- step
       output[[tool_progress_ui_output_id(this_step)]] <- renderUI({
@@ -5337,7 +5762,38 @@ server <- function(input, output, session) {
       updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "kallisto_use_trimmed", value = TRUE)
+      updateCheckboxInput(session, "cutrun_bowtie2_use_trimmed", value = TRUE)
     }
+  })
+  observeEvent(input$run_cutrun_bowtie2, {
+    trimmed <- isTRUE(input$cutrun_bowtie2_use_trimmed)
+    run_submission(
+      "Bowtie2",
+      submit_cutrun_bowtie2_jobs(
+        current_project(),
+        trimmed = trimmed,
+        mapq = input$cutrun_mapq %||% "30",
+        max_fragment = input$cutrun_max_fragment %||% "1000",
+        dedup_target = isTRUE(input$cutrun_dedup_targets),
+        dedup_control = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls),
+        remove_mito = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito)
+      ),
+      if (trimmed) "trimmed reads" else "raw reads"
+    )
+  })
+  observeEvent(input$run_cutrun_seacr, {
+    run_submission(
+      "SEACR",
+      submit_cutrun_seacr_jobs(current_project(), input$cutrun_seacr_norm %||% "norm", input$cutrun_seacr_stringency %||% "stringent"),
+      paste(input$cutrun_seacr_norm %||% "norm", input$cutrun_seacr_stringency %||% "stringent")
+    )
+  })
+  observeEvent(input$run_cutrun_macs2, {
+    run_submission(
+      "MACS2",
+      submit_cutrun_macs2_jobs(current_project(), input$cutrun_macs2_qvalue %||% "0.01", input$cutrun_macs2_peak_type %||% "narrow"),
+      paste(input$cutrun_macs2_peak_type %||% "narrow", "q", input$cutrun_macs2_qvalue %||% "0.01")
+    )
   })
   observeEvent(input$run_star, {
     trimmed <- isTRUE(input$star_use_trimmed)
@@ -5517,6 +5973,12 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   output$native_results_ui <- renderUI({
+    if (is_cutrun_project(current_project())) {
+      return(div(class = "empty-box",
+        tags$h4("CUT&RUN Results Explorer"),
+        tags$p("CUT&RUN run/progress support is active. Peak and track viewing will be added after the first server smoke test confirms the output layout.")
+      ))
+    }
     err <- native_results_error()
     if (nzchar(err)) {
       return(div(class = "empty-box", tags$h4("Results Explorer server error"), tags$pre(err)))
