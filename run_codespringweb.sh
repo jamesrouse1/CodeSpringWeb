@@ -45,6 +45,83 @@ install_r_package_if_missing "DT"
 install_r_package_if_missing "base64enc"
 install_r_package_if_missing "ggplot2"
 
+current_user() {
+  if [[ -n "${USER:-}" ]]; then
+    printf '%s\n' "$USER"
+  else
+    id -un 2>/dev/null || true
+  fi
+}
+
+pid_user() {
+  ps -o user= -p "$1" 2>/dev/null | awk '{print $1}' || true
+}
+
+pid_command() {
+  ps -o command= -p "$1" 2>/dev/null || true
+}
+
+listener_pids_for_port() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true
+  fi
+}
+
+looks_like_codespring_app() {
+  local cmd="$1"
+  [[ "$cmd" =~ (CodeSpringApp|CodeSpringWeb|shiny::runApp|runApp\(|/Rscript|/R[[:space:]]) ]]
+}
+
+stop_pid_if_ours() {
+  local pid="$1"
+  local reason="$2"
+  local owner
+  local me
+  local cmd
+  pid="${pid//[!0-9]/}"
+  [[ -n "$pid" ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  me="$(current_user)"
+  owner="$(pid_user "$pid")"
+  cmd="$(pid_command "$pid")"
+  if [[ -n "$owner" && -n "$me" && "$owner" != "$me" ]]; then
+    return 1
+  fi
+  if ! looks_like_codespring_app "$cmd"; then
+    return 1
+  fi
+  kill "$pid" 2>/dev/null || true
+  sleep 0.4
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  printf '\033[33mStopped previous CodeSpringApp process %s (%s).\033[0m\n' "$pid" "$reason"
+  return 0
+}
+
+cleanup_previous_codespring_app_ports() {
+  local pid
+  local pf
+  local candidate
+
+  shopt -s nullglob
+  for pf in "$LOG_DIR"/codespringweb_*.pid "$LOG_DIR"/codespringapp_*.pid; do
+    pid="$(head -n 1 "$pf" 2>/dev/null || true)"
+    stop_pid_if_ours "$pid" "pidfile $(basename "$pf")" || true
+    rm -f "$pf"
+  done
+  shopt -u nullglob
+
+  for candidate in $(seq "$START_PORT" "$MAX_PORT"); do
+    for pid in $(listener_pids_for_port "$candidate"); do
+      stop_pid_if_ours "$pid" "port $candidate" || true
+    done
+  done
+}
+
+cleanup_previous_codespring_app_ports
+
 port_is_busy() {
   local port="$1"
 
