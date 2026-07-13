@@ -2842,9 +2842,9 @@ cutrun_reference_resources <- function(project) {
     )
   } else {
     list(
-      label = "Mouse GRCm39 / GENCODE M29 Bowtie2 CUT&RUN reference",
-      bowtie2_index = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/GRCm39_M29_gencode_bowtie2index/GRCm39_M29_gencode",
-      chrom_sizes = "/grid/bsr/data/data/utama/genome/GRCm39_M29_gencode/mm39.chrom.sizes",
+      label = "Mouse GRCm39 / GENCODE M39 Bowtie2 CUT&RUN reference",
+      bowtie2_index = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/bowtie2_index/GRCm39_gencodeM39",
+      chrom_sizes = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/GRCm39.chrom.sizes",
       macs2_genome = "mm"
     )
   }
