@@ -791,6 +791,31 @@ default_metadata_cols <- function(project = NULL, analysis = NULL) {
   "treatment"
 }
 
+parse_metadata_cols <- function(x, project = NULL) {
+  raw <- unlist(strsplit(as.character(x %||% ""), ",", fixed = TRUE), use.names = FALSE)
+  cols <- clean_name(trimws(raw))
+  cols <- cols[nzchar(cols) & !cols %in% c("sample", "filename", "include", "status")]
+  cols <- unique(cols)
+  if (!length(cols)) cols <- default_metadata_cols(project)
+  cols
+}
+
+ensure_design_metadata_columns <- function(df, metadata_cols) {
+  if (!NROW(df) && !length(names(df))) {
+    df <- data.frame(include = logical(), sample = character(), filename = character(), status = character())
+  }
+  metadata_cols <- unique(metadata_cols[nzchar(metadata_cols)])
+  for (base_col in c("include", "sample", "filename", "status")) {
+    if (!base_col %in% names(df)) {
+      df[[base_col]] <- if (identical(base_col, "include")) TRUE else ""
+    }
+  }
+  for (col in metadata_cols) {
+    if (!col %in% names(df)) df[[col]] <- ""
+  }
+  df[, c("include", "sample", metadata_cols, "filename", "status"), drop = FALSE]
+}
+
 as_design_bool <- function(x) {
   if (is.logical(x)) return(isTRUE(x))
   tolower(as.character(x %||% "")) %in% c("true", "t", "1", "yes", "y")
@@ -856,6 +881,10 @@ results_design_matrix_path <- function(project) {
 
 write_design_matrix <- function(project, df, metadata_cols) {
   if (!"include" %in% names(df)) df$include <- TRUE
+  metadata_cols <- unique(metadata_cols[nzchar(metadata_cols)])
+  metadata_cols <- metadata_cols[!metadata_cols %in% c("sample", "filename", "include", "status")]
+  if (!length(metadata_cols)) metadata_cols <- default_metadata_cols(project)
+  df <- ensure_design_metadata_columns(df, metadata_cols)
   keep <- df[vapply(df$include, as_design_bool, logical(1)), , drop = FALSE]
   if (!NROW(keep)) stop("No samples are included.")
   blank_sample <- !nzchar(trimws(as.character(keep$sample %||% "")))
@@ -5700,10 +5729,7 @@ server <- function(input, output, session) {
   })
 
   metadata_cols_from_input <- reactive({
-    cols <- clean_name(unlist(strsplit(input$metadata_cols %||% "", ",")))
-    cols <- cols[nzchar(cols) & !cols %in% c("sample", "filename", "include", "status")]
-    if (!length(cols)) cols <- default_metadata_cols(current_project())
-    unique(cols)
+    parse_metadata_cols(input$metadata_cols, current_project())
   })
 
   observeEvent(input$scan_fastqs, {
@@ -5724,6 +5750,7 @@ server <- function(input, output, session) {
         df$include <- TRUE
         df$status <- "saved"
         df <- df[, c("include", setdiff(names(df), c("include", "status")), "status"), drop = FALSE]
+        df <- ensure_design_metadata_columns(df, default_metadata_cols(p))
         design_state(df)
       }
     } else {
@@ -5750,7 +5777,7 @@ server <- function(input, output, session) {
     }
     df <- collect_design_inputs(input, design_state())
     design_state(df)
-    metadata <- setdiff(names(df), c("include", "sample", "filename", "status"))
+    metadata <- metadata_cols_from_input()
     msg <- tryCatch({
       original_design_path <- p$design_matrix_path %||% ""
       design_path <- write_design_matrix(p, df, metadata)
