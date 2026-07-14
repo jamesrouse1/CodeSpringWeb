@@ -673,12 +673,14 @@ read_key_value_table <- function(path, key_name = "Metric", value_name = "Value"
 safe_read_result_table <- function(path, n = 5000) {
   if (!file.exists(path)) return(data.frame())
   ext <- tolower(tools::file_ext(path))
-  if (ext %in% c("bed", "bedgraph")) {
+  if (ext %in% c("bed", "bedgraph", "narrowpeak", "broadpeak")) {
     x <- tryCatch(utils::read.table(path, sep = "\t", header = FALSE, quote = "", comment.char = "", check.names = FALSE, nrows = n), error = function(e) data.frame())
     if (NROW(x)) {
       names(x) <- paste0("V", seq_len(NCOL(x)))
       if (ext == "bedgraph" && NCOL(x) >= 4) names(x)[1:4] <- c("chrom", "start", "end", "score")
       if (ext == "bed" && NCOL(x) >= 3) names(x)[1:3] <- c("chrom", "start", "end")
+      if (ext == "narrowpeak" && NCOL(x) >= 10) names(x)[1:10] <- c("chrom", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")
+      if (ext == "broadpeak" && NCOL(x) >= 9) names(x)[1:9] <- c("chrom", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue")
     }
     return(x)
   }
@@ -4524,6 +4526,24 @@ list_result_files <- function(project, pattern = "\\.(txt|csv|tsv|html|png|pdf)$
   list.files(project$data_dir, pattern = pattern, recursive = TRUE, full.names = TRUE)
 }
 
+relative_result_labels <- function(project, files) {
+  if (!length(files)) return(character(0))
+  prefix <- paste0(normalizePath(project$data_dir, winslash = "/", mustWork = FALSE), "/")
+  labels <- normalizePath(files, winslash = "/", mustWork = FALSE)
+  labels[startsWith(labels, prefix)] <- substring(labels[startsWith(labels, prefix)], nchar(prefix) + 1)
+  labels
+}
+
+result_file_choices <- function(project, subdirs = character(0), pattern = "\\.(txt|csv|tsv)$") {
+  files <- list_result_files(project, pattern)
+  if (length(subdirs)) {
+    keep <- paste0("/(", paste(subdirs, collapse = "|"), ")/")
+    files <- files[grepl(keep, files)]
+  }
+  files <- sort(files)
+  stats::setNames(files, relative_result_labels(project, files))
+}
+
 image_or_file_ui <- function(path, height = "900px") {
   if (!file.exists(path)) return(tags$div(class = "empty-box", "File not found."))
   ext <- tolower(tools::file_ext(path))
@@ -6211,10 +6231,21 @@ server <- function(input, output, session) {
             tags$h4("Design matrix"),
             table_output("design_table")
           ),
+          tabPanel("QC",
+            br(),
+            uiOutput("fastqc_select_ui"),
+            uiOutput("fastqc_view")
+          ),
           tabPanel("Alignment",
             br(),
             tags$h4("Bowtie2 alignment summary"),
             table_output("cutrun_alignment_summary")
+          ),
+          tabPanel("SEACR Peaks",
+            br(),
+            tags$h4("SEACR peak calls"),
+            uiOutput("cutrun_seacr_peak_ui"),
+            table_output("cutrun_seacr_peak_table")
           ),
           tabPanel("Peak QC",
             br(),
@@ -6228,7 +6259,13 @@ server <- function(input, output, session) {
             br(),
             table_output("cutrun_peak_counts")
           ),
-          tabPanel("Files",
+          tabPanel("MACS2 Peaks",
+            br(),
+            tags$h4("MACS2 optional peak calls"),
+            uiOutput("cutrun_macs2_peak_ui"),
+            table_output("cutrun_macs2_peak_table")
+          ),
+          tabPanel("Tracks & Files",
             br(),
             uiOutput("cutrun_file_ui"),
             uiOutput("cutrun_file_view")
@@ -6274,17 +6311,34 @@ server <- function(input, output, session) {
   output$cutrun_peak_counts <- render_csl_table({
     safe_read_table(file.path(current_project()$data_dir, "cutrun_peak_qc", "seacr_consensus_peak_counts.tsv"), 5000)
   }, page_length = 50)
+  output$cutrun_seacr_peak_ui <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
+    progress_refresh()
+    choices <- result_file_choices(current_project(), "seacr", "\\.bed$")
+    if (!length(choices)) return(div(class = "empty-box", "No SEACR peak BED files were found yet."))
+    selectInput("cutrun_seacr_peak_file", "SEACR peak file", choices = choices, selected = selected_choice(input$cutrun_seacr_peak_file, choices, choices[[1]]), selectize = FALSE)
+  })
+  output$cutrun_seacr_peak_table <- render_csl_table({
+    req(input$cutrun_seacr_peak_file)
+    safe_read_result_table(input$cutrun_seacr_peak_file, 5000)
+  }, page_length = 50)
+  output$cutrun_macs2_peak_ui <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
+    progress_refresh()
+    choices <- result_file_choices(current_project(), "macs2", "(narrowPeak|broadPeak|peaks\\.xls)$")
+    if (!length(choices)) return(div(class = "empty-box", "No MACS2 peak files were found yet. MACS2 is optional."))
+    selectInput("cutrun_macs2_peak_file", "MACS2 peak file", choices = choices, selected = selected_choice(input$cutrun_macs2_peak_file, choices, choices[[1]]), selectize = FALSE)
+  })
+  output$cutrun_macs2_peak_table <- render_csl_table({
+    req(input$cutrun_macs2_peak_file)
+    safe_read_result_table(input$cutrun_macs2_peak_file, 5000)
+  }, page_length = 50)
   output$cutrun_file_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
     p <- current_project()
-    files <- list_result_files(p, "\\.(bed|bedgraph|bw|txt|tsv|csv|png|pdf|html)$")
-    files <- files[grepl("/(bowtie2|seacr|macs2|cutrun_peak_qc)/", files)]
-    if (!length(files)) return(div(class = "empty-box", "No CUT&RUN result files were found yet."))
-    prefix <- paste0(normalizePath(p$data_dir, winslash = "/", mustWork = FALSE), "/")
-    labels <- normalizePath(files, winslash = "/", mustWork = FALSE)
-    labels[startsWith(labels, prefix)] <- substring(labels[startsWith(labels, prefix)], nchar(prefix) + 1)
-    choices <- stats::setNames(files, labels)
+    choices <- result_file_choices(p, c("bowtie2", "seacr", "macs2", "cutrun_peak_qc"), "\\.(bed|bedgraph|bw|txt|tsv|csv|png|pdf|html|narrowPeak|broadPeak)$")
+    if (!length(choices)) return(div(class = "empty-box", "No CUT&RUN result files were found yet."))
     selectInput("cutrun_file", "CUT&RUN result file", choices = choices, selected = selected_choice(input$cutrun_file, choices, choices[[1]]), selectize = FALSE)
   })
   output$cutrun_file_view <- renderUI({
