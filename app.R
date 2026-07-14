@@ -781,7 +781,11 @@ sync_metadata_columns <- function(df, metadata_cols) {
 }
 
 design_matrix_columns <- function(df) {
-  if (!NROW(df)) return(c("include", "sample", "treatment", "filename", "status"))
+  existing_metadata <- setdiff(names(df), c("include", "sample", "filename", "status"))
+  if (!NROW(df)) {
+    if (length(existing_metadata)) return(c("include", "sample", existing_metadata, "filename", "status"))
+    return(c("include", "sample", "treatment", "filename", "status"))
+  }
   c("include", "sample", setdiff(names(df), c("include", "sample", "filename", "status")), "filename", "status")
 }
 
@@ -907,6 +911,32 @@ project_design_df <- function(project) {
   if (!NROW(df)) return(data.frame())
   if (!"sample" %in% names(df)) names(df)[1] <- "sample"
   df
+}
+
+design_editor_from_project <- function(project, metadata_cols = NULL) {
+  metadata_cols <- metadata_cols %||% default_metadata_cols(project)
+  metadata_cols <- unique(c(
+    metadata_cols,
+    if (file.exists(project$design_matrix_path)) {
+      existing <- safe_read_table(project$design_matrix_path)
+      setdiff(names(existing), c("sample", "filename", "include", "status"))
+    } else character(0)
+  ))
+  if (file.exists(project$design_matrix_path)) {
+    df <- safe_read_table(project$design_matrix_path)
+    if (NROW(df)) {
+      if (!"sample" %in% names(df)) names(df)[1] <- "sample"
+      df$include <- TRUE
+      df$status <- "saved"
+      df <- df[, c("include", setdiff(names(df), c("include", "status")), "status"), drop = FALSE]
+      return(ensure_design_metadata_columns(df, metadata_cols))
+    }
+  }
+  if (dir.exists(project$fastq_dir %||% "")) {
+    scanned <- scan_fastqs(project$fastq_dir, project$paired_end, metadata_cols)
+    if (NROW(scanned)) return(scanned)
+  }
+  ensure_design_metadata_columns(data.frame(), metadata_cols)
 }
 
 design_compare_columns <- function(project) {
@@ -5744,19 +5774,14 @@ server <- function(input, output, session) {
 
   observeEvent(current_project(), {
     p <- current_project()
-    if (file.exists(p$design_matrix_path)) {
-      df <- safe_read_table(p$design_matrix_path)
-      if (NROW(df)) {
-        df$include <- TRUE
-        df$status <- "saved"
-        df <- df[, c("include", setdiff(names(df), c("include", "status")), "status"), drop = FALSE]
-        df <- ensure_design_metadata_columns(df, default_metadata_cols(p))
-        design_state(df)
-      }
-    } else {
-      design_state(data.frame())
-    }
+    design_state(design_editor_from_project(p, default_metadata_cols(p)))
   }, ignoreInit = FALSE)
+
+  observeEvent(list(input$new_design_matrix_path, input$new_fastq_dir, input$new_paired_end, input$new_project_analysis), {
+    if (!identical(input$project_id, "__new__")) return()
+    p <- current_project()
+    design_state(design_editor_from_project(p, metadata_cols_from_input()))
+  }, ignoreInit = TRUE)
 
   output$design_editor_ui <- renderUI({
     df <- design_state()
