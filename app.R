@@ -2835,9 +2835,9 @@ cutrun_reference_resources <- function(project) {
   species <- genome_species(project)
   if (identical(species, "human")) {
     list(
-      label = "Human hg38 / GENCODE legacy Bowtie2 CUT&RUN reference",
-      bowtie2_index = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/hg38_p13_gencode_bowtie2index/hg38_p13_gencode",
-      chrom_sizes = "/grid/bsr/data/data/utama/genome/hg38_p13_gencode/hg38.chrom.sizes",
+      label = "Human GRCh38 / GENCODE v50 Bowtie2 CUT&RUN reference",
+      bowtie2_index = "/grid/bsr/data/data/utama/genome/human_gencode50/bowtie2_index/GRCh38_gencode50",
+      chrom_sizes = "/grid/bsr/data/data/utama/genome/human_gencode50/GRCh38.chrom.sizes",
       macs2_genome = "hs"
     )
   } else {
