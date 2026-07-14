@@ -654,6 +654,37 @@ safe_read_table <- function(path, n = Inf) {
   })
 }
 
+read_key_value_table <- function(path, key_name = "Metric", value_name = "Value") {
+  lines <- read_metric_lines(path)
+  lines <- lines[nzchar(lines)]
+  if (!length(lines)) return(data.frame())
+  parts <- strsplit(lines, "\t", fixed = TRUE)
+  rows <- lapply(parts, function(x) {
+    if (length(x) < 2) return(NULL)
+    data.frame(key = x[[1]], value = paste(x[-1], collapse = "\t"), stringsAsFactors = FALSE)
+  })
+  rows <- Filter(Negate(is.null), rows)
+  if (!length(rows)) return(data.frame())
+  out <- do.call(rbind, rows)
+  names(out) <- c(key_name, value_name)
+  out
+}
+
+safe_read_result_table <- function(path, n = 5000) {
+  if (!file.exists(path)) return(data.frame())
+  ext <- tolower(tools::file_ext(path))
+  if (ext %in% c("bed", "bedgraph")) {
+    x <- tryCatch(utils::read.table(path, sep = "\t", header = FALSE, quote = "", comment.char = "", check.names = FALSE, nrows = n), error = function(e) data.frame())
+    if (NROW(x)) {
+      names(x) <- paste0("V", seq_len(NCOL(x)))
+      if (ext == "bedgraph" && NCOL(x) >= 4) names(x)[1:4] <- c("chrom", "start", "end", "score")
+      if (ext == "bed" && NCOL(x) >= 3) names(x)[1:3] <- c("chrom", "start", "end")
+    }
+    return(x)
+  }
+  safe_read_table(path, n)
+}
+
 render_data_table <- function(df, page_length = 50, height = NULL) {
   if (!NROW(df)) return(tags$div(class = "empty-box", "No rows available."))
   if (DT_AVAILABLE) {
@@ -1603,7 +1634,7 @@ tool_reference_summary <- function(project) {
       c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Input mode selected per run; reruns skip completed samples and submit failed/deleted samples only."),
       c("Tool", "cutadapt", cutadapt_modules, "Adapter trimming", "Raw FASTQ", "Adapter presets or custom adapters from Run Pipeline; minimum length from Run Pipeline."),
       c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment and normalization", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, CPM normalization, keep target duplicates, deduplicate IgG/input controls, remove mitochondrial fragments from peak-calling bedGraphs. Optional spike-in alignment/normalization is available when a spike-in Bowtie2 index is supplied."),
-      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Default norm/stringent; controls are selected from control_sample or inferred IgG/input rows. FRiP is written from fragments overlapping SEACR peaks."),
+      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Default stringent; normalization defaults to norm for CPM/raw tracks and non for spike-in-normalized tracks. Controls are selected from control_sample or inferred IgG/input rows. FRiP is written from fragments overlapping SEACR peaks."),
       c("Tool", "Peak QC", "BEDTools module listed in CodeSpringLab script", "Consensus peaks, peak count matrix, and FRiP summary", "SEACR peak BED files and Bowtie2 BAM files", "Merges SEACR peaks across samples and counts fragments over consensus peaks."),
       c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01 and narrow peaks; broad mode available for broad histone marks.")
     )
@@ -2230,6 +2261,75 @@ previous_size_for <- function(cache, path) {
 read_metric_lines <- function(path) {
   if (!nzchar(path %||% "") || !file.exists(path)) return(character(0))
   tryCatch(readLines(path, warn = FALSE), error = function(e) character(0))
+}
+
+metric_file_to_named_list <- function(path) {
+  rows <- read_key_value_table(path)
+  if (!NROW(rows) || NCOL(rows) < 2) return(list())
+  vals <- as.list(as.character(rows[[2]]))
+  names(vals) <- as.character(rows[[1]])
+  vals
+}
+
+cutrun_alignment_summary_table <- function(project) {
+  summary_path <- file.path(project$data_dir, "bowtie2_summary", "cutrun_alignment_summary.txt")
+  saved <- safe_read_table(summary_path, 5000)
+  files <- if (dir.exists(file.path(project$data_dir, "bowtie2"))) {
+    list.files(file.path(project$data_dir, "bowtie2"), pattern = "_alignment_summary\\.txt$", recursive = TRUE, full.names = TRUE)
+  } else character(0)
+  if (!length(files)) return(saved)
+  rows <- lapply(sort(files), function(path) {
+    vals <- metric_file_to_named_list(path)
+    if (!length(vals)) return(NULL)
+    sample <- vals[["sample"]] %||% basename(dirname(path))
+    cols <- c(
+      sample = sample,
+      mapped_reads = vals[["mapped_reads"]] %||% "",
+      deduplicated_reads = vals[["deduplicated_reads"]] %||% "",
+      fragments_used_for_signal = vals[["fragments_used_for_signal"]] %||% "",
+      duplicate_fraction = vals[["duplicate_fraction"]] %||% "",
+      normalization_mode = vals[["normalization_mode"]] %||% "",
+      spikein_mapped_reads = vals[["spikein_mapped_reads"]] %||% "",
+      spikein_scale_factor = vals[["spikein_scale_factor"]] %||% "",
+      normalized_bedgraph = vals[["normalized_bedgraph"]] %||% ""
+    )
+    as.data.frame(as.list(cols), stringsAsFactors = FALSE, check.names = FALSE)
+  })
+  rows <- Filter(Negate(is.null), rows)
+  if (!length(rows)) return(saved)
+  do.call(rbind, rows)
+}
+
+cutrun_seacr_frip_table <- function(project) {
+  saved <- safe_read_table(file.path(project$data_dir, "cutrun_peak_qc", "seacr_frip_summary.tsv"), 5000)
+  files <- if (dir.exists(file.path(project$data_dir, "seacr"))) {
+    list.files(file.path(project$data_dir, "seacr"), pattern = "_seacr_summary\\.txt$", recursive = TRUE, full.names = TRUE)
+  } else character(0)
+  if (!length(files)) return(saved)
+  rows <- lapply(sort(files), function(path) {
+    vals <- metric_file_to_named_list(path)
+    if (!length(vals)) return(NULL)
+    sample <- basename(dirname(path))
+    cols <- c(
+      sample = sample,
+      frip = vals[["frip"]] %||% "",
+      fragments_in_peaks = vals[["fragments_in_peaks"]] %||% "",
+      total_fragments = vals[["total_fragments"]] %||% "",
+      normalization = vals[["normalization"]] %||% "",
+      stringency = vals[["stringency"]] %||% "",
+      target_bedgraph = vals[["target_bedgraph"]] %||% "",
+      control_bedgraph = vals[["control_bedgraph"]] %||% ""
+    )
+    as.data.frame(as.list(cols), stringsAsFactors = FALSE, check.names = FALSE)
+  })
+  rows <- Filter(Negate(is.null), rows)
+  if (!length(rows)) return(saved)
+  do.call(rbind, rows)
+}
+
+cutrun_peak_qc_summary_table <- function(project) {
+  path <- file.path(project$data_dir, "cutrun_peak_qc", "cutrun_peak_qc_summary.txt")
+  read_key_value_table(path)
 }
 
 clean_metric_number <- function(x) {
@@ -6163,13 +6263,13 @@ server <- function(input, output, session) {
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
   output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
   output$cutrun_alignment_summary <- render_csl_table({
-    safe_read_table(file.path(current_project()$data_dir, "bowtie2_summary", "cutrun_alignment_summary.txt"), 5000)
+    cutrun_alignment_summary_table(current_project())
   }, page_length = 50)
   output$cutrun_frip_summary <- render_csl_table({
-    safe_read_table(file.path(current_project()$data_dir, "cutrun_peak_qc", "seacr_frip_summary.tsv"), 5000)
+    cutrun_seacr_frip_table(current_project())
   }, page_length = 50)
   output$cutrun_peak_qc_summary <- render_csl_table({
-    safe_read_table(file.path(current_project()$data_dir, "cutrun_peak_qc", "cutrun_peak_qc_summary.txt"), 5000)
+    cutrun_peak_qc_summary_table(current_project())
   }, page_length = 50)
   output$cutrun_peak_counts <- render_csl_table({
     safe_read_table(file.path(current_project()$data_dir, "cutrun_peak_qc", "seacr_consensus_peak_counts.tsv"), 5000)
@@ -6198,7 +6298,7 @@ server <- function(input, output, session) {
   })
   output$cutrun_selected_table <- render_csl_table({
     req(input$cutrun_file)
-    safe_read_table(input$cutrun_file, 5000)
+    safe_read_result_table(input$cutrun_file, 5000)
   }, page_length = 50)
   output$fastqc_select_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
