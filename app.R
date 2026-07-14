@@ -3946,7 +3946,7 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
     target <- file.path(sample_dir, paste0(sample, ".", stringency, ".bed"))
     submit_sbatch(
       project, "SEACR", script,
-      c(cutrun_bowtie2_bedgraph(project, sample), control_bdg, norm, stringency, file.path(sample_dir, sample), project$name, cutrun_bowtie2_fragments(project, sample)),
+      c(cutrun_bowtie2_bedgraph(project, sample), control_bdg, norm, stringency, file.path(sample_dir, sample), project$name, cutrun_bowtie2_fragments(project, sample), file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh")),
       "seacr", paste(norm, stringency), sample = sample, target = target, reference = "SEACR local script"
     )
   }, character(1))
