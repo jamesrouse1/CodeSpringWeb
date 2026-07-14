@@ -1010,8 +1010,17 @@ job_history_progress_display_from_jobs <- function(jobs) {
   jobs[, keep, drop = FALSE]
 }
 
-project_samples <- function(project) {
+included_design_table <- function(project) {
   design <- safe_read_table(project$design_matrix_path)
+  if (!NROW(design)) return(design)
+  if ("include" %in% names(design)) {
+    design <- design[vapply(design$include, as_design_bool, logical(1)), , drop = FALSE]
+  }
+  design
+}
+
+project_samples <- function(project) {
+  design <- included_design_table(project)
   if (!NROW(design) || !"sample" %in% names(design)) return(character(0))
   unique(as.character(design$sample[nzchar(as.character(design$sample))]))
 }
@@ -2318,7 +2327,7 @@ sample_step_metrics <- function(project, sample, step, jobs) {
 }
 
 sample_progress <- function(project, active_states = active_job_state_map(project), previous_cache = data.frame(), jobs = NULL) {
-  design <- safe_read_table(project$design_matrix_path)
+  design <- included_design_table(project)
   if (!NROW(design) || !"sample" %in% names(design)) return(list(table = data.frame(), cache = previous_cache))
   sample_steps <- sample_level_steps_for_project(project)
   if (is.null(jobs)) jobs <- job_history(project)
@@ -2328,8 +2337,10 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   active_jobs <- if (NROW(jobs) && "slurm_state" %in% names(jobs)) jobs[jobs$slurm_state %in% active_job_states, , drop = FALSE] else data.frame()
   rows <- list()
   cache_rows <- list()
+  target_by_sample <- if ("target" %in% names(design)) stats::setNames(as.character(design$target), as.character(design$sample)) else setNames(rep("", NROW(design)), as.character(design$sample))
   for (sample in as.character(design$sample)) {
     for (step in sample_steps) {
+      if (is_cutrun_project(project) && step %in% c("SEACR", "MACS2 (optional)") && cutrun_control_like(target_by_sample[[sample]] %||% "")) next
       targets <- sample_step_targets(project, sample, step)
       target <- paste(targets, collapse = "; ")
       sizes <- vapply(targets, file_size_for, numeric(1))
@@ -2904,7 +2915,7 @@ resolve_read_path <- function(base, value) {
 }
 
 sample_fastq_pairs <- function(project, trimmed = FALSE) {
-  design <- safe_read_table(project$design_matrix_path)
+  design <- included_design_table(project)
   if (!NROW(design) || !"sample" %in% names(design) || !"filename" %in% names(design)) return(data.frame())
   base <- if (trimmed) file.path(project$data_dir, "cutadapt") else project$fastq_dir
   rows <- lapply(seq_len(NROW(design)), function(i) {
@@ -3477,11 +3488,27 @@ cutrun_missing_bowtie2_message <- function(project, step = "this step") {
   if (nzchar(active_msg)) return(active_msg)
   design <- cutrun_design(project)
   if (!NROW(design)) return("No samples found in design_matrix.txt. Create or fix the design matrix before running CUT&RUN peak calling.")
-  files <- file.path(project$data_dir, "bowtie2", as.character(design$sample), paste0(as.character(design$sample), "_fragments.raw.bedgraph"))
+  target_design <- cutrun_target_design(project, include_controls = FALSE)
+  required_samples <- if (step %in% c("SEACR", "MACS2", "MACS2 (optional)")) {
+    controls <- vapply(as.character(target_design$sample), function(sample) cutrun_control_sample_for(project, sample), character(1))
+    unique(c(as.character(target_design$sample), controls[nzchar(controls)]))
+  } else {
+    as.character(design$sample)
+  }
+  if (!length(required_samples)) return(paste("No non-control CUT&RUN target samples were found for", step, ". Fill the target column and avoid labeling every row as IgG/input/control."))
+  files <- if (step %in% c("MACS2", "MACS2 (optional)")) {
+    vapply(required_samples, function(sample) cutrun_bowtie2_bam(project, sample), character(1))
+  } else {
+    vapply(required_samples, function(sample) cutrun_bowtie2_bedgraph(project, sample), character(1))
+  }
+  if (identical(step, "SEACR")) {
+    target_fragments <- vapply(as.character(target_design$sample), function(sample) cutrun_bowtie2_fragments(project, sample), character(1))
+    files <- c(files, target_fragments)
+  }
   missing <- files[!file.exists(files) | vapply(files, file_size_for, numeric(1)) <= 0]
   if (length(missing)) {
     return(paste(c(
-      paste("Run Bowtie2 successfully before", step, "so fragment bedGraphs exist for all target/control samples."),
+      paste("Run Bowtie2 successfully before", step, "so required target/control alignment files exist."),
       "Missing or empty files:",
       missing
     ), collapse = "\n"))
@@ -6075,9 +6102,38 @@ server <- function(input, output, session) {
 
   output$native_results_ui <- renderUI({
     if (is_cutrun_project(current_project())) {
-      return(div(class = "empty-box",
-        tags$h4("CUT&RUN Results Explorer"),
-        tags$p("CUT&RUN run/progress support is active. Peak and track viewing will be added after the first server smoke test confirms the output layout.")
+      return(div(class = "native-results-wrap",
+        tabsetPanel(
+          tabPanel("Overview",
+            br(),
+            table_output("results_overview"),
+            br(),
+            tags$h4("Design matrix"),
+            table_output("design_table")
+          ),
+          tabPanel("Alignment",
+            br(),
+            tags$h4("Bowtie2 alignment summary"),
+            table_output("cutrun_alignment_summary")
+          ),
+          tabPanel("Peak QC",
+            br(),
+            tags$h4("SEACR FRiP summary"),
+            table_output("cutrun_frip_summary"),
+            br(),
+            tags$h4("Peak QC summary"),
+            table_output("cutrun_peak_qc_summary")
+          ),
+          tabPanel("Peak Counts",
+            br(),
+            table_output("cutrun_peak_counts")
+          ),
+          tabPanel("Files",
+            br(),
+            uiOutput("cutrun_file_ui"),
+            uiOutput("cutrun_file_view")
+          )
+        )
       ))
     }
     err <- native_results_error()
@@ -6106,6 +6162,44 @@ server <- function(input, output, session) {
 
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
   output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
+  output$cutrun_alignment_summary <- render_csl_table({
+    safe_read_table(file.path(current_project()$data_dir, "bowtie2_summary", "cutrun_alignment_summary.txt"), 5000)
+  }, page_length = 50)
+  output$cutrun_frip_summary <- render_csl_table({
+    safe_read_table(file.path(current_project()$data_dir, "cutrun_peak_qc", "seacr_frip_summary.tsv"), 5000)
+  }, page_length = 50)
+  output$cutrun_peak_qc_summary <- render_csl_table({
+    safe_read_table(file.path(current_project()$data_dir, "cutrun_peak_qc", "cutrun_peak_qc_summary.txt"), 5000)
+  }, page_length = 50)
+  output$cutrun_peak_counts <- render_csl_table({
+    safe_read_table(file.path(current_project()$data_dir, "cutrun_peak_qc", "seacr_consensus_peak_counts.tsv"), 5000)
+  }, page_length = 50)
+  output$cutrun_file_ui <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
+    progress_refresh()
+    p <- current_project()
+    files <- list_result_files(p, "\\.(bed|bedgraph|bw|txt|tsv|csv|png|pdf|html)$")
+    files <- files[grepl("/(bowtie2|seacr|macs2|cutrun_peak_qc)/", files)]
+    if (!length(files)) return(div(class = "empty-box", "No CUT&RUN result files were found yet."))
+    prefix <- paste0(normalizePath(p$data_dir, winslash = "/", mustWork = FALSE), "/")
+    labels <- normalizePath(files, winslash = "/", mustWork = FALSE)
+    labels[startsWith(labels, prefix)] <- substring(labels[startsWith(labels, prefix)], nchar(prefix) + 1)
+    choices <- stats::setNames(files, labels)
+    selectInput("cutrun_file", "CUT&RUN result file", choices = choices, selected = selected_choice(input$cutrun_file, choices, choices[[1]]), selectize = FALSE)
+  })
+  output$cutrun_file_view <- renderUI({
+    req(input$cutrun_file)
+    ext <- tolower(tools::file_ext(input$cutrun_file))
+    if (ext %in% c("txt", "tsv", "csv", "bed", "bedgraph")) {
+      table_output("cutrun_selected_table")
+    } else {
+      image_or_file_ui(input$cutrun_file, "900px")
+    }
+  })
+  output$cutrun_selected_table <- render_csl_table({
+    req(input$cutrun_file)
+    safe_read_table(input$cutrun_file, 5000)
+  }, page_length = 50)
   output$fastqc_select_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
