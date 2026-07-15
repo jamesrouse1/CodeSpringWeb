@@ -3221,7 +3221,8 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   active_jobs <- if (NROW(jobs) && "slurm_state" %in% names(jobs)) jobs[jobs$slurm_state %in% active_job_states, , drop = FALSE] else data.frame()
   rows <- list()
   cache_rows <- list()
-  target_by_sample <- if ("target" %in% names(design)) stats::setNames(as.character(design$target), as.character(design$sample)) else setNames(rep("", NROW(design)), as.character(design$sample))
+  target_design <- if (is_cutrun_project(project)) cutrun_design(project) else design
+  target_by_sample <- if ("target" %in% names(target_design)) stats::setNames(as.character(target_design$target), as.character(target_design$sample)) else setNames(rep("", NROW(target_design)), as.character(target_design$sample))
   for (sample in as.character(design$sample)) {
     for (step in sample_steps) {
       if (is_cutrun_project(project) && step %in% c("SEACR", "MACS2 (optional)") && cutrun_control_like(target_by_sample[[sample]] %||% "")) next
@@ -7235,7 +7236,8 @@ server <- function(input, output, session) {
             selectInput("cutrun_seacr_norm", "SEACR normalization", choices = c("norm", "non"), selected = selected_choice(input$cutrun_seacr_norm, c("norm", "non"), seacr_norm_default), selectize = FALSE),
             selectInput("cutrun_seacr_stringency", "Default SEACR stringency", choices = c("Stringent (recommended default)" = "stringent", "Relaxed" = "relaxed"), selected = selected_choice(input$cutrun_seacr_stringency, c("stringent", "relaxed"), "stringent"), selectize = FALSE),
             tags$p(class = "muted small-note", "SEACR normalization follows the Bowtie signal automatically: non for E. coli spike-in, norm for CPM or raw signal. A sample-level stringent/relaxed value in design_matrix.txt overrides this default; auto uses this setting. TF versus histone class does not automatically change SEACR stringency."),
-            tags$p(class = "muted small-note", "Use stringent for the primary analysis. Relaxed is an optional sensitivity analysis and is not automatically required for histone marks.")
+            tags$p(class = "muted small-note", "Use stringent for the primary analysis. Relaxed is an optional sensitivity analysis and is not automatically required for histone marks."),
+            tags$p(class = "muted small-note", "IgG/input rows do not receive their own SEACR peak job. Their Bowtie2 bedGraph is used as the control for matched target samples, so SEACR progress intentionally lists targets only.")
           ),
           "run_cutrun_seacr", "Submit SEACR")
         },
