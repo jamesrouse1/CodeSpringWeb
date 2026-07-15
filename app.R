@@ -3417,6 +3417,14 @@ tool_progress_ui_output_id <- function(step) {
   paste0("tool_progress_ui_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
 }
 
+tool_retry_ui_output_id <- function(step) {
+  paste0("tool_retry_ui_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
+tool_retry_button_id <- function(step) {
+  paste0("retry_incomplete_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
+}
+
 tool_message_output_id <- function(step) {
   paste0("tool_message_", tolower(gsub("[^A-Za-z0-9]+", "_", step)))
 }
@@ -3453,6 +3461,51 @@ sample_level_steps_for_project <- function(project) {
   if (is_cutrun_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "SEACR", "MACS2 (optional)")
   else if (is_atac_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks")
   else c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
+}
+
+primary_run_button_id <- function(project, step) {
+  if (identical(step, "Cutadapt")) return("run_cutadapt")
+  if (identical(step, "FastQC")) return("run_fastqc")
+  if (identical(step, "Bowtie2")) return(if (is_cutrun_project(project)) "run_cutrun_bowtie2" else "run_atac_bowtie2")
+  if (identical(step, "SEACR")) return("run_cutrun_seacr")
+  if (identical(step, "MACS2 (optional)")) return("run_cutrun_macs2")
+  if (identical(step, "MACS2 Peaks")) return("run_atac_macs2")
+  if (identical(step, "STAR")) return("run_star")
+  if (identical(step, "featureCounts")) return("run_featurecounts")
+  if (identical(step, "RSEM (optional)")) return("run_rsem")
+  if (identical(step, "Kallisto (optional)")) return("run_kallisto")
+  ""
+}
+
+sample_retry_candidates <- function(progress_df, step) {
+  if (!NROW(progress_df) || !all(c("sample", "step", "status") %in% names(progress_df))) return(character(0))
+  hit <- progress_df[progress_df$step == step, , drop = FALSE]
+  if (!NROW(hit)) return(character(0))
+  retry_status <- hit$status %in% c("Not started", "Likely failed", "Cancelled", "Possibly incomplete") |
+    grepl(", Deleted$", hit$status)
+  sort(unique(as.character(hit$sample[retry_status & nzchar(as.character(hit$sample))])))
+}
+
+sample_retry_ui <- function(project, progress_df, step) {
+  if (!NROW(progress_df) || !"step" %in% names(progress_df) || !any(progress_df$step == step)) return(NULL)
+  samples <- sample_retry_candidates(progress_df, step)
+  if (!length(samples)) {
+    return(div(class = "sample-retry-zone complete", tags$strong("Incomplete/failed samples"), tags$span("None detected.")))
+  }
+  primary_id <- primary_run_button_id(project, step)
+  if (!nzchar(primary_id)) return(NULL)
+  onclick <- sprintf(
+    "var button=document.getElementById('%s'); if(button){button.click();}",
+    primary_id
+  )
+  div(
+    class = "sample-retry-zone",
+    div(class = "sample-retry-heading",
+        tags$strong(sprintf("Incomplete/failed samples (%d)", length(samples))),
+        tags$span("Only these samples will be submitted; completed and active samples are skipped.")),
+    div(class = "sample-retry-chip-wrap", lapply(samples, function(sample) tags$span(class = "sample-retry-chip", sample))),
+    actionButton(tool_retry_button_id(step), "Run incomplete/failed samples only", class = "btn-warning", onclick = onclick)
+  )
 }
 
 runnable_pipeline_steps <- function(project = NULL) {
@@ -4314,15 +4367,17 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   if (!length(plan$samples)) return(plan$message)
   pairs <- pairs[pairs$sample %in% plan$samples, , drop = FALSE]
   script <- file.path(SCRIPTS_DIR, "FastQC", "qsub_fastqc.sh")
+  runner <- file.path(SCRIPTS_DIR, "FastQC", "fastqc.sh")
+  missing_scripts <- c(script, runner)
+  missing_scripts <- missing_scripts[!file.exists(missing_scripts)]
+  if (length(missing_scripts)) return(record_preflight_failure(project, "FastQC", paste("Required FastQC scripts are missing:", paste(missing_scripts, collapse = ", ")), "fastQC"))
   input_mode <- if (trimmed) "trimmed reads" else "raw reads"
-  commands <- character(0)
-  for (i in seq_len(NROW(pairs))) {
+  commands <- vapply(seq_len(NROW(pairs)), function(i) {
     reads <- unique(unlist(lapply(c(pairs$r1[i], if (project$paired_end) pairs$r2[i] else character(0)), split_fastq_path_list), use.names = FALSE))
-    for (read in reads[nzchar(reads)]) {
-      target <- file.path(outdir, sub(fastq_suffix_regex, "_fastqc.html", basename(read), ignore.case = TRUE))
-      commands <- c(commands, submit_sbatch(project, "FastQC", script, c(read, outdir, project$name), "fastQC", input_mode, sample = pairs$sample[i], target = target))
-    }
-  }
+    reads <- reads[nzchar(reads)]
+    target <- file.path(outdir, sub(fastq_suffix_regex, "_fastqc.html", basename(reads[[1]]), ignore.case = TRUE))
+    submit_sbatch(project, "FastQC", script, c(paste(reads, collapse = ","), outdir, project$name, runner), "fastQC", input_mode, sample = pairs$sample[i], target = target)
+  }, character(1))
   paste(append_plan_message(commands, plan), collapse = "\n")
 }
 
@@ -5575,6 +5630,7 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
         actionButton(button_id, button_label, class = "btn-primary"),
         uiOutput(tool_message_output_id(step)),
         if (isTRUE(show_sample_progress) && status_step %in% sample_level_pipeline_steps()) uiOutput(tool_progress_ui_output_id(status_step)) else NULL,
+        if (isTRUE(show_sample_progress) && status_step %in% sample_level_pipeline_steps()) uiOutput(tool_retry_ui_output_id(status_step)) else NULL,
         if (isTRUE(show_job_actions)) div(class = "tool-cancel-zone",
             actionButton(tool_cancel_button_id(step), "Cancel active jobs", class = "btn-danger btn-sm")
         ) else NULL,
@@ -5905,6 +5961,12 @@ body { background:#eef3f8; color:#17202f; }
 .tool-progress-table tr:last-child td { border-bottom:0; }
 .tool-progress-table .sample-status { min-width:118px; width:auto; max-width:100%; padding:6px 11px; font-size:12px; }
 .tool-progress-table .sample-name { font-weight:800; color:#17202f; }
+.sample-retry-zone { margin-top:12px; padding:12px 14px; border:1px solid #f0c36d; border-radius:8px; background:#fff8e6; }
+.sample-retry-zone.complete { display:flex; align-items:center; gap:8px; border-color:#b7dfc7; background:#eefaf3; color:#315f4c; }
+.sample-retry-heading { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; margin-bottom:9px; color:#7c3d00; }
+.sample-retry-heading span { font-size:12px; color:#657084; }
+.sample-retry-chip-wrap { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:10px; max-height:180px; overflow:auto; }
+.sample-retry-chip { border-radius:999px; border:1px solid #e3b34f; background:white; padding:5px 9px; font-size:12px; font-weight:800; color:#6f4200; overflow-wrap:anywhere; }
 .project-step-summary { margin:12px 0; border:1px solid #d8dde8; border-radius:8px; background:#f8fafc; padding:12px; }
 .project-step-summary-title { font-size:12px; font-weight:800; color:#304a66; text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px; }
 .project-step-summary-row { display:flex; align-items:flex-start; gap:10px; margin-top:8px; }
@@ -7543,6 +7605,9 @@ server <- function(input, output, session) {
       this_step <- step
       output[[tool_progress_ui_output_id(this_step)]] <- renderUI({
         sample_progress_step_ui(sample_progress_state(), this_step)
+      })
+      output[[tool_retry_ui_output_id(this_step)]] <- renderUI({
+        sample_retry_ui(current_project(), sample_progress_state(), this_step)
       })
       output[[tool_progress_output_id(this_step)]] <- render_csl_table({
         sample_progress_step_table(sample_progress_state(), this_step)
