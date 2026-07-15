@@ -347,6 +347,21 @@ resolve_legacy_path <- function(value, key = "rna") {
   normalizePath(file.path(base, value), winslash = "/", mustWork = FALSE)
 }
 
+parse_fastq_dirs <- function(value, normalize = TRUE) {
+  value <- as.character(value %||% character(0))
+  parts <- unlist(strsplit(value, "[\r\n;]+", perl = TRUE), use.names = FALSE)
+  parts <- trimws(parts)
+  parts <- parts[nzchar(parts)]
+  if (!isTRUE(normalize)) return(unique(parts))
+  unique(normalizePath(path.expand(parts), winslash = "/", mustWork = FALSE))
+}
+
+project_fastq_dirs <- function(project) {
+  dirs <- parse_fastq_dirs(project$fastq_dirs %||% project$fastq_dir %||% "")
+  if (!length(dirs) && nzchar(project$fastq_dir %||% "")) dirs <- parse_fastq_dirs(project$fastq_dir)
+  dirs
+}
+
 with_slash <- function(path) {
   path <- trimws(as.character(path %||% ""))
   if (!nzchar(path)) return(path)
@@ -385,7 +400,9 @@ legacy_project_from_config <- function(path) {
     results_root <- dirname(dirname(visualizer_data_dir))
   }
   inpath_design <- resolve_legacy_path(vals$inpath_design %||% "", key)
-  fastq_dir <- resolve_legacy_path(vals$read_path_destination %||% vals$read_path_original %||% "", key)
+  configured_fastq_dirs <- parse_fastq_dirs(vals$read_paths %||% vals$read_path_destination %||% vals$read_path_original %||% "", normalize = FALSE)
+  fastq_dirs <- vapply(configured_fastq_dirs, resolve_legacy_path, character(1), key = key)
+  fastq_dir <- if (length(fastq_dirs)) fastq_dirs[[1]] else ""
   pairing <- tolower(vals$pairing %||% "y")
   data_dir <- if (nzchar(visualizer_data_dir)) visualizer_data_dir else file.path(results_root, project_name, "data")
   list(
@@ -400,6 +417,7 @@ legacy_project_from_config <- function(path) {
     results_root = results_root,
     data_dir = data_dir,
     fastq_dir = fastq_dir,
+    fastq_dirs = fastq_dirs,
     design_matrix_path = design_path_from_dir(inpath_design),
     source_config = normalizePath(path, winslash = "/", mustWork = FALSE),
     source = "CodeSpringLab config"
@@ -427,6 +445,7 @@ discover_projects <- function() {
       results_root = normalizePath(path.expand("~/csl_results"), winslash = "/", mustWork = FALSE),
       data_dir = normalizePath(path.expand("~/csl_results/example_dataset/data"), winslash = "/", mustWork = FALSE),
       fastq_dir = "",
+      fastq_dirs = character(0),
       design_matrix_path = normalizePath(path.expand("~/csl_results/example_dataset/data/manifest/design_matrix.txt"), winslash = "/", mustWork = FALSE),
       source_config = "",
       source = "default"
@@ -450,7 +469,9 @@ new_project_from_inputs <- function(input) {
     design_path <- file.path(normalizePath(dirname(path.expand(design_path)), winslash = "/", mustWork = FALSE), "design_matrix.txt")
   }
   design_path <- normalizePath(path.expand(design_path), winslash = "/", mustWork = FALSE)
-  fastq_dir <- normalizePath(path.expand(input$new_fastq_dir %||% ""), winslash = "/", mustWork = FALSE)
+  fastq_mode <- tolower(input$new_fastq_location_mode %||% "one")
+  fastq_dirs <- if (identical(fastq_mode, "multiple")) parse_fastq_dirs(input$new_fastq_dirs %||% "") else parse_fastq_dirs(input$new_fastq_dir %||% "")
+  fastq_dir <- if (length(fastq_dirs)) fastq_dirs[[1]] else ""
   paired <- !tolower(input$new_paired_end %||% "paired") %in% c("single", "se", "n", "no", "false")
   list(
     id = paste0(key, "/", project_name),
@@ -464,6 +485,7 @@ new_project_from_inputs <- function(input) {
     results_root = results_root,
     data_dir = data_dir,
     fastq_dir = fastq_dir,
+    fastq_dirs = fastq_dirs,
     design_matrix_path = design_path,
     source_config = "",
     source = "new project"
@@ -571,6 +593,7 @@ write_project_config <- function(project) {
     sprintf("inpath_design = %s", deparse(dirname(project$design_matrix_path))),
     sprintf("read_path_original = %s", deparse(project$fastq_dir)),
     sprintf("read_path_destination = %s", deparse(project$fastq_dir)),
+    sprintf("read_paths = %s", deparse(paste(project_fastq_dirs(project), collapse = ";"))),
     sprintf("genome = %s", deparse(project$genome)),
     sprintf("genome_version = %s", deparse(genome_reference_key(project))),
     sprintf("pairing = %s", deparse(if (isTRUE(project$paired_end)) "y" else "n"))
@@ -632,7 +655,7 @@ record_preflight_failure <- function(project, step, message, log_name = clean_na
     paste("step:", step),
     "status: pre-submit validation failed",
     paste("data_dir:", project$data_dir),
-    paste("fastq_dir:", project$fastq_dir),
+    paste("fastq_dirs:", paste(project_fastq_dirs(project), collapse = ";")),
     paste("design_matrix:", project$design_matrix_path),
     "",
     message
@@ -785,6 +808,26 @@ scan_fastqs <- function(folder, paired = TRUE, metadata_cols = "treatment", infe
   df[, c("include", "sample", metadata_cols, "filename", "status"), drop = FALSE]
 }
 
+scan_fastq_dirs <- function(folders, paired = TRUE, metadata_cols = "treatment", infer_samples = FALSE) {
+  folders <- parse_fastq_dirs(folders)
+  folders <- folders[dir.exists(folders)]
+  if (!length(folders)) return(scan_fastqs("", paired, metadata_cols, infer_samples))
+  multiple <- length(folders) > 1L
+  scanned <- lapply(folders, function(folder) {
+    df <- scan_fastqs(folder, paired, metadata_cols, infer_samples)
+    if (multiple && NROW(df)) {
+      df$filename <- vapply(as.character(df$filename), function(value) {
+        parts <- trimws(unlist(strsplit(value, ",", fixed = TRUE)))
+        paste(file.path(folder, basename(parts)), collapse = ",")
+      }, character(1))
+    }
+    df
+  })
+  out <- do.call(rbind, scanned)
+  rownames(out) <- NULL
+  out
+}
+
 infer_cutrun_metadata <- function(df) {
   if (!NROW(df) || !"sample" %in% names(df)) return(df)
   for (col in c("cell_type", "mark", "condition", "replicate", "control_sample")) {
@@ -793,7 +836,7 @@ infer_cutrun_metadata <- function(df) {
   for (i in seq_len(NROW(df))) {
     sample <- trimws(as.character(df$sample[[i]] %||% ""))
     core <- sub("_S[0-9]+(?:_.*)?$", "", sample, perl = TRUE, ignore.case = TRUE)
-    match <- regmatches(core, regexec("^([^_]+)_([^-]+)-(.+?)([0-9]+)$", core, perl = TRUE))[[1]]
+    match <- regmatches(core, regexec("^([^_]+)_([^_-]+)[_-](.+?)([0-9]+)$", core, perl = TRUE))[[1]]
     if (length(match) == 5L) {
       inferred <- c(cell_type = match[[2]], mark = match[[3]], condition = match[[4]], replicate = match[[5]])
     } else {
@@ -3638,10 +3681,10 @@ gencode_label <- function(project) {
   genome_resources(project)$label
 }
 
-resolve_read_path <- function(base, value) {
+resolve_read_path <- function(base, value, allow_absolute = TRUE) {
   value <- trimws(as.character(value %||% ""))
   if (!nzchar(value)) return("")
-  if (startsWith(path.expand(value), "/")) return(path.expand(value))
+  if (isTRUE(allow_absolute) && startsWith(path.expand(value), "/")) return(path.expand(value))
   file.path(base, basename(value))
 }
 
@@ -3653,8 +3696,8 @@ sample_fastq_pairs <- function(project, trimmed = FALSE) {
     parts <- trimws(unlist(strsplit(as.character(design$filename[i]), ",")))
     parts <- parts[nzchar(parts)]
     if (!length(parts)) return(NULL)
-    r1 <- resolve_read_path(base, parts[1])
-    r2 <- if (project$paired_end && length(parts) >= 2) resolve_read_path(base, parts[2]) else r1
+    r1 <- resolve_read_path(base, parts[1], allow_absolute = !isTRUE(trimmed))
+    r2 <- if (project$paired_end && length(parts) >= 2) resolve_read_path(base, parts[2], allow_absolute = !isTRUE(trimmed)) else r1
     data.frame(sample = as.character(design$sample[i]), r1 = r1, r2 = r2, stringsAsFactors = FALSE)
   })
   out <- do.call(rbind, Filter(Negate(is.null), rows))
@@ -4028,12 +4071,13 @@ missing_read_message <- function(project, pairs, trimmed = FALSE) {
     active_msg <- active_upstream_message(project, "Cutadapt", "steps that use trimmed reads")
     if (nzchar(active_msg)) return(active_msg)
   }
-  read_base <- if (isTRUE(trimmed)) file.path(project$data_dir, "cutadapt") else project$fastq_dir
-  if (!nzchar(read_base %||% "") || !dir.exists(read_base)) {
+  read_bases <- if (isTRUE(trimmed)) file.path(project$data_dir, "cutadapt") else project_fastq_dirs(project)
+  missing_bases <- read_bases[!dir.exists(read_bases)]
+  if (!length(read_bases) || length(missing_bases)) {
     return(paste(
       if (isTRUE(trimmed)) "Run cutadapt successfully before using trimmed reads. The trimmed FASTQ folder is missing or does not exist." else "The raw FASTQ folder is missing or does not exist.",
-      paste("FASTQ folder:", read_base),
-      "Choose the correct raw FASTQ folder in project setup, then save/create the project again.",
+      paste("FASTQ folder(s):", paste(if (length(missing_bases)) missing_bases else read_bases, collapse = ", ")),
+      "Choose the correct raw FASTQ folder(s) in project setup, then save/create the project again.",
       sep = "\n"
     ))
   }
@@ -6423,6 +6467,12 @@ server <- function(input, output, session) {
     open_server_browser("new_fastq_dir", "dir", input$new_fastq_dir %||% "")
   })
 
+  observeEvent(input$browse_new_fastq_dirs, {
+    existing <- parse_fastq_dirs(input$new_fastq_dirs %||% "")
+    start <- if (length(existing)) tail(existing, 1) else ""
+    open_server_browser("new_fastq_dirs", "dir", start)
+  })
+
   observeEvent(input$browse_new_results_root, {
     open_server_browser("new_results_root", "dir", input$new_results_root %||% "")
   })
@@ -6453,7 +6503,12 @@ server <- function(input, output, session) {
 
   observeEvent(input$browser_use_current, {
     value <- normalizePath(path_browser$path, winslash = "/", mustWork = FALSE)
-    updateTextInput(session, path_browser$target, value = value)
+    if (identical(path_browser$target, "new_fastq_dirs")) {
+      values <- unique(c(parse_fastq_dirs(input$new_fastq_dirs %||% ""), value))
+      updateTextAreaInput(session, "new_fastq_dirs", value = paste(values, collapse = "\n"))
+    } else {
+      updateTextInput(session, path_browser$target, value = value)
+    }
     removeModal()
   })
 
@@ -6487,11 +6542,21 @@ server <- function(input, output, session) {
       selectInput("new_species", "Species", choices = c("Mouse" = "mouse", "Human" = "human"), selected = "mouse", selectize = FALSE),
       uiOutput("new_genome_version_ui"),
       radioButtons("new_paired_end", "Reads", choices = c("Paired-end" = "paired", "Single-end" = "single"), selected = "paired"),
-      div(class = "new-project-path-control",
+      radioButtons(
+        "new_fastq_location_mode", "Where are the raw FASTQs?",
+        choices = c("One folder" = "one", "Multiple folders (treat as one input pool)" = "multiple"),
+        selected = "one"
+      ),
+      conditionalPanel("input.new_fastq_location_mode == 'one'", div(class = "new-project-path-control",
           textInput("new_fastq_dir", "Raw FASTQ folder", value = "", placeholder = "Choose with Browse or paste a server path"),
           actionButton("browse_new_fastq_dir", "Browse server", class = "btn-default"),
           tags$p(class = "muted", "This folder must contain the FASTQ files named in design_matrix.txt. If this path is wrong, jobs are not submitted and a pre-submit error is written in the Logs tab.")
-      ),
+      )),
+      conditionalPanel("input.new_fastq_location_mode == 'multiple'", div(class = "new-project-path-control",
+          textAreaInput("new_fastq_dirs", "Raw FASTQ folders", value = "", rows = 4, placeholder = "One server folder per line"),
+          actionButton("browse_new_fastq_dirs", "Add server folder", class = "btn-default"),
+          tags$p(class = "muted", "All listed folders are scanned as one input pool. Absolute FASTQ paths are saved in design_matrix.txt so samples can safely come from different sequencing runs.")
+      )),
       div(class = "new-project-path-control",
           textInput("new_results_root", "Results root", value = "~/csl_results", placeholder = "Where CodeSpringApp should write project results"),
           actionButton("browse_new_results_root", "Browse server", class = "btn-default")
@@ -6621,8 +6686,8 @@ server <- function(input, output, session) {
       ))
     }
     data.frame(
-      field = c("Project", "Analysis", "Species", "Genome/reference", "Reference key", "Paired-end", "Results root", "Data folder", "FASTQ folder", "Design matrix"),
-      value = c(p$label, p$analysis, genome_species(p), project_reference_label(p), genome_reference_key(p), as.character(p$paired_end), p$results_root, p$data_dir, p$fastq_dir, p$design_matrix_path),
+      field = c("Project", "Analysis", "Species", "Genome/reference", "Reference key", "Paired-end", "Results root", "Data folder", "FASTQ folder(s)", "Design matrix"),
+      value = c(p$label, p$analysis, genome_species(p), project_reference_label(p), genome_reference_key(p), as.character(p$paired_end), p$results_root, p$data_dir, paste(project_fastq_dirs(p), collapse = "\n"), p$design_matrix_path),
       stringsAsFactors = FALSE
     )
   })
@@ -6688,6 +6753,10 @@ server <- function(input, output, session) {
     }
     p <- new_project_from_inputs(input)
     msg <- tryCatch({
+      fastq_dirs <- project_fastq_dirs(p)
+      if (!length(fastq_dirs)) stop("Choose at least one raw FASTQ folder before creating the project.")
+      missing_fastq_dirs <- fastq_dirs[!dir.exists(fastq_dirs)]
+      if (length(missing_fastq_dirs)) stop("These raw FASTQ folders do not exist: ", paste(missing_fastq_dirs, collapse = ", "))
       result_dir <- project_result_dir(p)
       if (dir_has_contents(result_dir)) {
         if (!isTRUE(input$new_clear_existing_results)) {
@@ -6726,7 +6795,7 @@ server <- function(input, output, session) {
   observeEvent(input$scan_fastqs, {
     p <- current_project()
     is_cutrun <- is_cutrun_project(p); is_atac <- is_atac_project(p)
-    scanned <- scan_fastqs(p$fastq_dir, p$paired_end, metadata_cols_from_input(), infer_samples = is_cutrun || is_atac)
+    scanned <- scan_fastq_dirs(project_fastq_dirs(p), p$paired_end, metadata_cols_from_input(), infer_samples = is_cutrun || is_atac)
     if (is_cutrun) scanned <- infer_cutrun_metadata(scanned)
     if (is_atac) scanned <- infer_atac_metadata(scanned)
     design_state(scanned)
