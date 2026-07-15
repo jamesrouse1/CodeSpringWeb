@@ -167,7 +167,6 @@ PROGRESS_REFRESH_MS <- 5000
 JOB_HISTORY_CACHE_SECONDS <- 10
 JOB_HISTORY_CACHE <- new.env(parent = emptyenv())
 METRIC_LINES_CACHE <- new.env(parent = emptyenv())
-SAMPLE_PROGRESS_NICE_LIMIT <- 30
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
 CUTRUN_SPIKEIN_GENOME_CHOICES <- c("E. coli K-12 MG1655" = CUTRUN_DEFAULT_SPIKEIN_INDEX)
@@ -3352,13 +3351,6 @@ sample_progress_matrix_ui <- function(progress_df) {
   if (!NROW(progress_df)) return(div(class = "empty-box", "No sample progress available yet."))
   steps <- unique(progress_df$step[order(step_order(progress_df$step))])
   samples <- unique(progress_df$sample)
-  if (length(samples) > SAMPLE_PROGRESS_NICE_LIMIT) {
-    return(div(
-      class = "sample-matrix-wrap",
-      div(class = "adaptive-table-note", paste("Showing paginated sample progress because this project has", length(samples), "samples.")),
-      table_output("sample_progress_detail_table")
-    ))
-  }
   div(
     class = "sample-matrix-wrap",
     tags$table(
@@ -3519,42 +3511,34 @@ sample_progress_step_table <- function(progress_df, step) {
 sample_progress_step_ui <- function(progress_df, step) {
   table <- sample_progress_step_table(progress_df, step)
   if (!NROW(table)) return(NULL)
-  if (NROW(table) <= SAMPLE_PROGRESS_NICE_LIMIT) {
-    hit <- progress_df[progress_df$step == step, , drop = FALSE]
-    hit <- hit[order(hit$sample), , drop = FALSE]
-    return(div(
-      class = "tool-progress-wrap",
-      div(class = "tool-progress-title", "Sample progress"),
-      tags$table(
-        class = "tool-progress-table",
-        tags$thead(tags$tr(lapply(colnames(table), tags$th))),
-        tags$tbody(lapply(seq_len(NROW(hit)), function(i) {
-          title <- paste0(
-            "Status: ", hit$status[i],
-            "\nSLURM: ", if (nzchar(hit$slurm_state[i])) hit$slurm_state[i] else "-",
-            "\nBytes: ", hit$output_bytes[i],
-            "\nPath: ", hit$target[i],
-            if ("metric_1_name" %in% names(hit) && nzchar(hit$metric_1_name[i])) paste0("\n", hit$metric_1_name[i], ": ", hit$metric_1_value[i]) else "",
-            if ("metric_2_name" %in% names(hit) && nzchar(hit$metric_2_name[i])) paste0("\n", hit$metric_2_name[i], ": ", hit$metric_2_value[i]) else "",
-            if (nzchar(hit$note[i])) paste0("\nNote: ", hit$note[i]) else ""
-          )
-          time_running <- if ("time_running" %in% names(hit) && nzchar(hit$time_running[i])) hit$time_running[i] else "-"
-          row_values <- as.list(table[i, , drop = FALSE])
-          tags$tr(lapply(seq_along(row_values), function(j) {
-            nm <- names(row_values)[j]
-            value <- as.character(row_values[[j]])
-            if (identical(nm, "Sample")) return(tags$td(class = "sample-name", value))
-            if (identical(nm, "Status")) return(tags$td(tags$span(class = status_class(hit$status[i]), title = title, value)))
-            tags$td(value)
-          }))
-        }))
-      )
-    ))
-  }
+  hit <- progress_df[progress_df$step == step, , drop = FALSE]
+  hit <- hit[order(hit$sample), , drop = FALSE]
   div(
     class = "tool-progress-wrap",
-    div(class = "tool-progress-title", paste("Sample progress - paginated", NROW(table), "samples")),
-    table_output(tool_progress_output_id(step))
+    div(class = "tool-progress-title", paste("Sample progress —", NROW(table), "samples")),
+    tags$table(
+      class = "tool-progress-table",
+      tags$thead(tags$tr(lapply(colnames(table), tags$th))),
+      tags$tbody(lapply(seq_len(NROW(hit)), function(i) {
+        title <- paste0(
+          "Status: ", hit$status[i],
+          "\nSLURM: ", if (nzchar(hit$slurm_state[i])) hit$slurm_state[i] else "-",
+          "\nBytes: ", hit$output_bytes[i],
+          "\nPath: ", hit$target[i],
+          if ("metric_1_name" %in% names(hit) && nzchar(hit$metric_1_name[i])) paste0("\n", hit$metric_1_name[i], ": ", hit$metric_1_value[i]) else "",
+          if ("metric_2_name" %in% names(hit) && nzchar(hit$metric_2_name[i])) paste0("\n", hit$metric_2_name[i], ": ", hit$metric_2_value[i]) else "",
+          if (nzchar(hit$note[i])) paste0("\nNote: ", hit$note[i]) else ""
+        )
+        row_values <- as.list(table[i, , drop = FALSE])
+        tags$tr(lapply(seq_along(row_values), function(j) {
+          nm <- names(row_values)[j]
+          value <- as.character(row_values[[j]])
+          if (identical(nm, "Sample")) return(tags$td(class = "sample-name", value))
+          if (identical(nm, "Status")) return(tags$td(tags$span(class = status_class(hit$status[i]), title = title, value)))
+          tags$td(value)
+        }))
+      }))
+    )
   )
 }
 
