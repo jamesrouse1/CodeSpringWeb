@@ -5563,7 +5563,7 @@ tool_panel <- function(step, status, description, controls, button_id, button_la
   cls <- status_css_key(st)
   tags$details(
     class = paste("tool-panel", cls),
-    open = identical(st, "Active") || identical(st, "Not started"),
+    open = if (identical(st, "Active") || identical(st, "Not started")) TRUE else NULL,
     tags$summary(
       div(class = "tool-summary",
           div(tags$strong(step), tags$span(description)),
