@@ -794,11 +794,26 @@ infer_cutrun_metadata <- function(df) {
     sample <- trimws(as.character(df$sample[[i]] %||% ""))
     core <- sub("_S[0-9]+(?:_.*)?$", "", sample, perl = TRUE, ignore.case = TRUE)
     match <- regmatches(core, regexec("^([^_]+)_([^-]+)-(.+?)([0-9]+)$", core, perl = TRUE))[[1]]
-    if (length(match) != 5L) next
-    inferred <- c(cell_type = match[[2]], mark = match[[3]], condition = match[[4]], replicate = match[[5]])
+    if (length(match) == 5L) {
+      inferred <- c(cell_type = match[[2]], mark = match[[3]], condition = match[[4]], replicate = match[[5]])
+    } else {
+      control_match <- regmatches(core, regexec("^([^_]+)_(IgG|input|control)[_-](.+)$", core, perl = TRUE, ignore.case = TRUE))[[1]]
+      if (length(control_match) != 4L) next
+      inferred <- c(cell_type = control_match[[2]], mark = control_match[[3]], condition = control_match[[4]])
+    }
     for (field in names(inferred)) {
       if (!nzchar(trimws(as.character(df[[field]][[i]] %||% "")))) df[[field]][[i]] <- inferred[[field]]
     }
+  }
+  control_rows <- grepl("igg|input|control", tolower(as.character(df$mark)))
+  for (i in which(!control_rows)) {
+    if (nzchar(trimws(as.character(df$control_sample[[i]] %||% "")))) next
+    exact <- which(
+      control_rows &
+        trimws(as.character(df$cell_type)) == trimws(as.character(df$cell_type[[i]])) &
+        trimws(as.character(df$condition)) == trimws(as.character(df$condition[[i]]))
+    )
+    if (length(exact) == 1L) df$control_sample[[i]] <- as.character(df$sample[[exact]])
   }
   df
 }
@@ -3558,14 +3573,16 @@ cutrun_reference_resources <- function(project) {
       label = "Human GRCh38 / GENCODE v50 Bowtie2 CUT&RUN reference",
       bowtie2_index = "/grid/bsr/data/data/utama/genome/human_gencode50/bowtie2_index/GRCh38_gencode50",
       chrom_sizes = "/grid/bsr/data/data/utama/genome/human_gencode50/GRCh38.chrom.sizes",
-      macs2_genome = "hs"
+      macs2_genome = "hs",
+      blacklist = ""
     )
   } else {
     list(
       label = "Mouse GRCm39 / GENCODE M39 Bowtie2 CUT&RUN reference",
       bowtie2_index = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/bowtie2_index/GRCm39_gencodeM39",
       chrom_sizes = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/GRCm39.chrom.sizes",
-      macs2_genome = "mm"
+      macs2_genome = "mm",
+      blacklist = file.path(SCRIPTS_DIR, "test", "manifest_atac", "mm39-blacklist.bed")
     )
   }
 }
@@ -3576,15 +3593,13 @@ atac_reference_resources <- function(project) {
     base$macs2_genome <- "2.7e+9"
     c(base, list(
       effective_genome_size = "2913022398", homer_genome = "hg38",
-      tss_bed = "/grid/bsr/data/data/utama/genome/human_gencode50/gencode.v50.annotation_onlyChrNoMito.bed",
-      blacklist = ""
+      tss_bed = "/grid/bsr/data/data/utama/genome/human_gencode50/gencode.v50.annotation_onlyChrNoMito.bed"
     ))
   } else {
     base$macs2_genome <- "1.87e+9"
     c(base, list(
       effective_genome_size = "2654621783", homer_genome = "mm39",
-      tss_bed = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/gencode.vM39.annotation_onlyChrNoMito.bed",
-      blacklist = file.path(SCRIPTS_DIR, "test", "manifest_atac", "mm39-blacklist.bed")
+      tss_bed = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/gencode.vM39.annotation_onlyChrNoMito.bed"
     ))
   }
 }
@@ -4146,6 +4161,7 @@ cutrun_design <- function(project) {
   for (col in c("cell_type", "mark", "target", "condition", "replicate", "control_sample")) {
     if (!col %in% names(design)) design[[col]] <- ""
   }
+  design <- infer_cutrun_metadata(design)
   missing_mark <- !nzchar(trimws(as.character(design$mark)))
   design$mark[missing_mark] <- as.character(design$target[missing_mark])
   missing_target <- !nzchar(trimws(as.character(design$target)))
@@ -4173,9 +4189,19 @@ cutrun_control_sample_for <- function(project, sample) {
   if (nzchar(explicit) && explicit %in% design$sample) return(explicit)
   controls <- design[cutrun_control_like(design$target), , drop = FALSE]
   if (!NROW(controls)) return("")
-  same_condition <- controls[trimws(as.character(controls$condition)) == trimws(as.character(row$condition)), , drop = FALSE]
-  if (NROW(same_condition)) return(as.character(same_condition$sample[1]))
-  as.character(controls$sample[1])
+  cell <- trimws(as.character(row$cell_type %||% ""))
+  condition <- trimws(as.character(row$condition %||% ""))
+  control_cell <- trimws(as.character(controls$cell_type))
+  control_condition <- trimws(as.character(controls$condition))
+  exact <- controls[control_cell == cell & control_condition == condition, , drop = FALSE]
+  if (NROW(exact) == 1L) return(as.character(exact$sample[1]))
+  cell_default <- controls[control_cell == cell & !nzchar(control_condition), , drop = FALSE]
+  if (NROW(cell_default) == 1L) return(as.character(cell_default$sample[1]))
+  global_condition <- controls[control_cell %in% c("", "all") & control_condition == condition, , drop = FALSE]
+  if (NROW(global_condition) == 1L) return(as.character(global_condition$sample[1]))
+  global <- controls[control_cell %in% c("", "all") & !nzchar(control_condition), , drop = FALSE]
+  if (NROW(global) == 1L) return(as.character(global$sample[1]))
+  ""
 }
 
 cutrun_bowtie2_bam <- function(project, sample) {
@@ -4432,6 +4458,18 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   design <- cutrun_target_design(project, include_controls = FALSE)
   if (!NROW(design)) return(record_preflight_failure(project, "SEACR", "No non-control CUT&RUN target samples were found. Fill the target column and avoid labeling every row as IgG/input/control.", "seacr"))
+  full_design <- cutrun_design(project)
+  if (any(cutrun_control_like(full_design$target))) {
+    resolved_controls <- vapply(as.character(design$sample), function(sample) cutrun_control_sample_for(project, sample), character(1))
+    unresolved <- as.character(design$sample[!nzchar(resolved_controls)])
+    if (length(unresolved)) {
+      return(record_preflight_failure(project, "SEACR", paste(
+        "Condition-matched IgG/input controls exist, but these targets do not resolve to exactly one compatible control:",
+        paste(unresolved, collapse = ", "),
+        "Set control_sample explicitly, or use matching cell_type and condition values in design_matrix.txt."
+      ), "seacr"))
+    }
+  }
   target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) {
     hits <- if (dir.exists(file.path(outdir, sample))) list.files(file.path(outdir, sample), pattern = "\\.bed$", full.names = TRUE) else character(0)
     if (length(hits)) hits else file.path(outdir, sample, paste0(sample, ".", stringency, ".bed"))
@@ -4618,13 +4656,16 @@ submit_cutrun_diffbind_job <- function(project, reference_condition, min_replica
   qsub <- file.path(SCRIPTS_DIR, "DiffBind", "qsub_cutrun_diffbind.sh")
   runner <- file.path(SCRIPTS_DIR, "DiffBind", "cutrun_diffbind.sh")
   r_script <- file.path(SCRIPTS_DIR, "DiffBind", "cutrun_diffbind.R")
-  missing_scripts <- c(qsub, runner, r_script)[!file.exists(c(qsub, runner, r_script))]
+  resources <- cutrun_reference_resources(project)
+  blacklist <- trimws(as.character(resources$blacklist %||% ""))
+  required <- c(qsub, runner, r_script, if (genome_species(project) == "mouse") blacklist else character(0))
+  missing_scripts <- required[!file.exists(required)]
   if (length(missing_scripts)) {
     return(record_preflight_failure(project, "Differential Peaks", paste("CodeSpringLab CUT&RUN DiffBind scripts are missing:", paste(missing_scripts, collapse = ", ")), "cutrun_diffbind"))
   }
   submit_sbatch(
     project, "Differential Peaks", qsub,
-    c(r_script, sample_sheet, outdir, reference_condition, min_replicates, genome_species(project), runner),
+    c(r_script, sample_sheet, outdir, reference_condition, min_replicates, genome_species(project), if (nzchar(blacklist)) blacklist else "none", runner),
     "cutrun_diffbind", paste("mark-aware; reference", reference_condition, "; replicate support", min_replicates),
     target = target, reference = paste("SEACR + DiffBind/DESeq2;", genome_species(project))
   )
