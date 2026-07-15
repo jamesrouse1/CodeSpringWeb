@@ -6551,6 +6551,13 @@ server <- function(input, output, session) {
   cutrun_normalization_choice <- reactiveVal("spikein")
   path_browser <- reactiveValues(target = "", mode = "dir", path = path.expand("~"))
   project_selection <- reactiveValues(rna = "", cutrun = "", atac = "", chip = "")
+  new_fastq_folders <- reactiveVal(character(0))
+
+  new_project_input_values <- function() {
+    values <- reactiveValuesToList(input)
+    values$new_fastq_dirs <- paste(new_fastq_folders(), collapse = "\n")
+    values
+  }
 
   carry_forward_job_elapsed <- function(jobs, previous_jobs) {
     if (!NROW(jobs) || !NROW(previous_jobs) || !"job_id" %in% names(jobs) || !"job_id" %in% names(previous_jobs)) return(jobs)
@@ -6748,9 +6755,45 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$browse_new_fastq_dirs, {
-    existing <- parse_fastq_dirs(input$new_fastq_dirs %||% "")
+    existing <- new_fastq_folders()
     start <- if (length(existing)) tail(existing, 1) else ""
-    open_server_browser("new_fastq_dirs", "dir", start)
+    open_server_browser("new_fastq_dir_add", "dir", input$new_fastq_dir_add %||% start)
+  })
+
+  observeEvent(input$add_new_fastq_dir, {
+    value <- trimws(input$new_fastq_dir_add %||% "")
+    if (!nzchar(value)) return()
+    value <- normalizePath(path.expand(value), winslash = "/", mustWork = FALSE)
+    new_fastq_folders(unique(c(new_fastq_folders(), value)))
+    updateTextInput(session, "new_fastq_dir_add", value = "")
+  })
+
+  observeEvent(input$remove_new_fastq_dir, {
+    remove <- input$new_fastq_dir_remove %||% ""
+    if (!nzchar(remove)) return()
+    new_fastq_folders(setdiff(new_fastq_folders(), remove))
+  })
+
+  output$new_fastq_folder_list_ui <- renderUI({
+    folders <- new_fastq_folders()
+    if (!length(folders)) {
+      return(div(class = "empty-box", "No FASTQ folders added yet."))
+    }
+    tagList(
+      div(class = "path-list compact-path-list",
+          lapply(seq_along(folders), function(i) {
+            div(class = "path-item", span(paste("Folder", i)), code(folders[[i]]))
+          })
+      ),
+      div(class = "path-browser-actions",
+          selectInput(
+            "new_fastq_dir_remove", "Remove a folder",
+            choices = stats::setNames(folders, paste("Folder", seq_along(folders))),
+            selected = folders[[length(folders)]], selectize = FALSE
+          ),
+          actionButton("remove_new_fastq_dir", "Remove selected", class = "btn-default")
+      )
+    )
   })
 
   observeEvent(input$browse_new_results_root, {
@@ -6783,12 +6826,7 @@ server <- function(input, output, session) {
 
   observeEvent(input$browser_use_current, {
     value <- normalizePath(path_browser$path, winslash = "/", mustWork = FALSE)
-    if (identical(path_browser$target, "new_fastq_dirs")) {
-      values <- unique(c(parse_fastq_dirs(input$new_fastq_dirs %||% ""), value))
-      updateTextAreaInput(session, "new_fastq_dirs", value = paste(values, collapse = "\n"))
-    } else {
-      updateTextInput(session, path_browser$target, value = value)
-    }
+    updateTextInput(session, path_browser$target, value = value)
     removeModal()
   })
 
@@ -6833,9 +6871,13 @@ server <- function(input, output, session) {
           tags$p(class = "muted", "This folder must contain the FASTQ files named in design_matrix.txt. If this path is wrong, jobs are not submitted and a pre-submit error is written in the Logs tab.")
       )),
       conditionalPanel("input.new_fastq_location_mode == 'multiple'", div(class = "new-project-path-control",
-          textAreaInput("new_fastq_dirs", "Raw FASTQ folders", value = "", rows = 4, placeholder = "One server folder per line"),
-          actionButton("browse_new_fastq_dirs", "Add server folder", class = "btn-default"),
-          tags$p(class = "muted", "All listed folders are scanned as one input pool. Absolute FASTQ paths are saved in design_matrix.txt so samples can safely come from different sequencing runs.")
+          textInput("new_fastq_dir_add", "Add one raw FASTQ folder", value = "", placeholder = "Paste one server path, then click Add folder"),
+          div(class = "path-browser-actions",
+              actionButton("browse_new_fastq_dirs", "Browse server", class = "btn-default"),
+              actionButton("add_new_fastq_dir", "Add folder", class = "btn-primary")
+          ),
+          uiOutput("new_fastq_folder_list_ui"),
+          tags$p(class = "muted", "Add each sequencing-run folder separately. The saved folders are scanned as one input pool. Source FASTQs are read-only inputs; Cutadapt, Bowtie2, and all later steps write only beneath the project results folder.")
       )),
       div(class = "new-project-path-control",
           textInput("new_results_root", "Results root", value = "~/csl_results", placeholder = "Where CodeSpringApp should write project results"),
@@ -6880,12 +6922,12 @@ server <- function(input, output, session) {
   current_project <- reactive({
     selected <- input$project_id
     if (is.null(selected) || !length(selected) || !nzchar(selected) || identical(selected, "__new__")) {
-      return(new_project_from_inputs(input))
+      return(new_project_from_inputs(new_project_input_values()))
     }
     p <- filtered_projects()
     req(length(p) > 0)
     idx <- match(selected, names(p))
-    if (!length(idx) || is.na(idx)) return(new_project_from_inputs(input))
+    if (!length(idx) || is.na(idx)) return(new_project_from_inputs(new_project_input_values()))
     p[[idx]]
   })
 
@@ -7031,7 +7073,7 @@ server <- function(input, output, session) {
       output$create_project_status <- renderText("ERROR: Enter a project name before creating the project.")
       return()
     }
-    p <- new_project_from_inputs(input)
+    p <- new_project_from_inputs(new_project_input_values())
     msg <- tryCatch({
       fastq_dirs <- project_fastq_dirs(p)
       if (!length(fastq_dirs)) stop("Choose at least one raw FASTQ folder before creating the project.")
@@ -7056,6 +7098,7 @@ server <- function(input, output, session) {
       cfg <- write_project_config(p)
       refreshed <- discover_projects()
       projects(refreshed)
+      new_fastq_folders(character(0))
       write_last_project_id(p$id)
       updateSelectInput(session, "project_id", choices = project_select_choices(refreshed, p$analysis), selected = p$id)
       cleanup <- cleanup %||% ""
