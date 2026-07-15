@@ -769,6 +769,24 @@ scan_fastqs <- function(folder, paired = TRUE, metadata_cols = "treatment", infe
   df[, c("include", "sample", metadata_cols, "filename", "status"), drop = FALSE]
 }
 
+infer_cutrun_metadata <- function(df) {
+  if (!NROW(df) || !"sample" %in% names(df)) return(df)
+  for (col in c("cell_type", "mark", "condition", "replicate", "control_sample")) {
+    if (!col %in% names(df)) df[[col]] <- ""
+  }
+  for (i in seq_len(NROW(df))) {
+    sample <- trimws(as.character(df$sample[[i]] %||% ""))
+    core <- sub("_S[0-9]+(?:_.*)?$", "", sample, perl = TRUE, ignore.case = TRUE)
+    match <- regmatches(core, regexec("^([^_]+)_([^-]+)-(.+?)([0-9]+)$", core, perl = TRUE))[[1]]
+    if (length(match) != 5L) next
+    inferred <- c(cell_type = match[[2]], mark = match[[3]], condition = match[[4]], replicate = match[[5]])
+    for (field in names(inferred)) {
+      if (!nzchar(trimws(as.character(df[[field]][[i]] %||% "")))) df[[field]][[i]] <- inferred[[field]]
+    }
+  }
+  df
+}
+
 sync_metadata_columns <- function(df, metadata_cols) {
   if (!NROW(df)) {
     df <- data.frame(include = logical(), sample = character(), filename = character(), status = character())
@@ -792,7 +810,7 @@ design_matrix_columns <- function(df) {
 
 default_metadata_cols <- function(project = NULL, analysis = NULL) {
   key <- if (!is.null(project)) analysis_key(project$analysis_key %||% project$analysis) else analysis_key(analysis %||% "rna")
-  if (identical(key, "cutrun")) return(c("target", "condition", "replicate", "control_sample"))
+  if (identical(key, "cutrun")) return(c("cell_type", "mark", "condition", "replicate", "control_sample"))
   "treatment"
 }
 
@@ -1350,6 +1368,7 @@ step_data_paths <- function(project, step, samples = NULL) {
     "Bowtie2" = file.path(data_dir, "bowtie2"),
     "SEACR" = file.path(data_dir, "seacr"),
     "Peak QC" = file.path(data_dir, "cutrun_peak_qc"),
+    "Differential Peaks" = file.path(data_dir, "cutrun_diffbind"),
     "MACS2 (optional)" = file.path(data_dir, "macs2"),
     "featureCounts" = c(
       file.path(data_dir, "featurecounts"),
@@ -1469,6 +1488,8 @@ canonical_job_step <- function(x) {
     bowtie2 = "Bowtie2",
     seacr = "SEACR",
     macs2 = "MACS2 (optional)",
+    diffbind = "Differential Peaks",
+    differentialpeaks = "Differential Peaks",
     featurecounts = "featureCounts",
     deseq2 = "DESeq2",
     gsea = "GSEA",
@@ -1640,6 +1661,7 @@ tool_reference_summary <- function(project) {
       file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_cutrun_SE.sh")
     ))
     seacr_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh"), "SEACR_1.3.sh local script; BEDTools/R modules")
+    diffbind_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "DiffBind", "cutrun_diffbind.sh"), "R/DiffBind library used by CodeSpringLab")
     macs2_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "MACS2", "macs2_cutrun_PE.sh"), "MACS2 module listed in CodeSpringLab script")
     ref <- cutrun_reference_resources(project)
     rows <- list(
@@ -1649,6 +1671,7 @@ tool_reference_summary <- function(project) {
       c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment and normalization", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, E. coli K-12 MG1655 spike-in normalization, keep target duplicates, deduplicate IgG/input controls, and remove mitochondrial fragments from peak-calling bedGraphs. CPM and no normalization remain available as explicit alternatives."),
       c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Default stringent with non selected for the default spike-in-normalized tracks; norm is used for CPM/raw tracks. Controls are selected from control_sample or inferred IgG/input rows. FRiP is written from fragments overlapping SEACR peaks."),
       c("Tool", "Peak QC", "BEDTools module listed in CodeSpringLab script", "Consensus peaks, peak count matrix, and FRiP summary", "SEACR peak BED files and Bowtie2 BAM files", "Merges SEACR peaks across samples and counts fragments over consensus peaks."),
+      c("Tool", "DiffBind/DESeq2", diffbind_modules, "Mark-specific CUT&RUN differential binding", "SEACR peaks, target BAMs, and automatically resolved E. coli spike-in BAMs", "Analyzes each cell type/mark separately; condition consensus requires the selected replicate support; native SEACR widths are preserved with summits=FALSE; IgG BAMs are not subtracted again."),
       c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01 and narrow peaks; broad mode available for broad histone marks.")
     )
     out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
@@ -1683,6 +1706,7 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     "Cutadapt" = paste0("Adapter trimming was performed with cutadapt.", mode_text),
     "Bowtie2" = paste0("CUT&RUN fragments were aligned with Bowtie2.", ref_text, mode_text),
     "SEACR" = paste0("CUT&RUN peaks were called with SEACR from fragment bedGraphs.", ref_text, mode_text),
+    "Differential Peaks" = paste0("Differential CUT&RUN binding was tested separately by cell type and mark using DiffBind with DESeq2. Native SEACR intervals were preserved and spike-in BAMs were reused automatically when available.", ref_text, mode_text),
     "MACS2 (optional)" = paste0("Optional CUT&RUN peaks were called with MACS2.", ref_text, mode_text),
     "STAR" = paste0("Reads were aligned with STAR using ", gencode_label(project), ".", ref_text, mode_text),
     "featureCounts" = paste0("Gene-level counts were quantified with featureCounts using the selected GTF annotation.", ref_text, mode_text),
@@ -1970,6 +1994,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (count_files(file.path(data_dir, "bowtie2"), "_alignment_summary\\.txt$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "seacr"), "\\.bed$") + count_files(file.path(data_dir, "seacr"), "\\.bedgraph$") > 0) "Complete" else "Not started",
         if (file.exists(file.path(data_dir, "cutrun_peak_qc", "seacr_consensus_peaks.bed"))) "Complete" else "Not started",
+        if (file.exists(file.path(data_dir, "cutrun_diffbind", "_COMPLETE"))) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started"
       ),
       path = c(
@@ -1979,6 +2004,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         file.path(data_dir, "bowtie2"),
         file.path(data_dir, "seacr"),
         file.path(data_dir, "cutrun_peak_qc"),
+        file.path(data_dir, "cutrun_diffbind"),
         file.path(data_dir, "macs2")
       ),
       stringsAsFactors = FALSE
@@ -2107,7 +2133,7 @@ rna_pipeline_order <- function() {
 }
 
 cutrun_pipeline_order <- function() {
-  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "Peak QC", "MACS2 (optional)")
+  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "Peak QC", "Differential Peaks", "MACS2 (optional)")
 }
 
 all_pipeline_steps <- function() {
@@ -2345,6 +2371,17 @@ cutrun_peak_qc_summary_table <- function(project) {
   read_key_value_table(path)
 }
 
+cutrun_diffbind_summary_table <- function(project) {
+  safe_read_table(file.path(project$data_dir, "cutrun_diffbind", "cutrun_diffbind_summary.tsv"), 5000)
+}
+
+cutrun_diffbind_result_dirs <- function(project) {
+  root <- file.path(project$data_dir, "cutrun_diffbind")
+  if (!dir.exists(root)) return(character(0))
+  dirs <- list.dirs(root, recursive = FALSE, full.names = TRUE)
+  dirs[file.exists(file.path(dirs, "all_differential_peaks.tsv"))]
+}
+
 cutrun_metric_card <- function(label, value, note = "", tone = "blue") {
   div(
     class = paste("cutrun-metric-card", paste0("tone-", tone)),
@@ -2539,7 +2576,8 @@ cutrun_results_explorer_ui <- function() {
                 table_output("cutrun_frip_summary"),
                 br(),
                 tags$h4("Consensus peak summary"),
-                table_output("cutrun_peak_qc_summary")
+                table_output("cutrun_peak_qc_summary"),
+                tags$p(class = "muted small-note", "This is a project-wide QC union only. Differential Peaks builds independent reproducible consensus sets for each cell type and mark.")
               ),
               tabPanel("MACS2 (optional)",
                 br(),
@@ -2555,8 +2593,32 @@ cutrun_results_explorer_ui <- function() {
               )
             )
           ),
+          tabPanel("Differential Peaks",
+            br(),
+            sidebarLayout(
+              sidebarPanel(
+                width = 2,
+                uiOutput("cutrun_diffbind_comparison_ui"),
+                tags$hr(),
+                helpText("Each cell type and mark is analyzed independently. Tables contain DiffBind/DESeq2 results from raw BAM fragment counts with automatic spike-in or background normalization.")
+              ),
+              mainPanel(
+                width = 10,
+                tags$h4("Analysis summary"),
+                table_output("cutrun_diffbind_summary"),
+                tags$hr(),
+                tabsetPanel(
+                  tabPanel("Results", br(), table_output("cutrun_diffbind_results")),
+                  tabPanel("PCA", br(), uiOutput("cutrun_diffbind_pca_ui")),
+                  tabPanel("Volcano", br(), uiOutput("cutrun_diffbind_volcano_ui")),
+                  tabPanel("Heatmap", br(), uiOutput("cutrun_diffbind_heatmap_ui"))
+                )
+              )
+            )
+          ),
           tabPanel("Peak Counts",
             br(),
+            tags$p(class = "muted small-note", "Project-wide QC counts. Use Differential Peaks for mark-specific statistical comparisons."),
             table_output("cutrun_peak_counts")
           ),
           tabPanel("Files",
@@ -3765,9 +3827,14 @@ cutrun_design <- function(project) {
   if ("include" %in% names(design)) {
     design <- design[vapply(design$include, as_design_bool, logical(1)), , drop = FALSE]
   }
-  for (col in c("target", "condition", "replicate", "control_sample")) {
+  for (col in c("cell_type", "mark", "target", "condition", "replicate", "control_sample")) {
     if (!col %in% names(design)) design[[col]] <- ""
   }
+  missing_mark <- !nzchar(trimws(as.character(design$mark)))
+  design$mark[missing_mark] <- as.character(design$target[missing_mark])
+  missing_target <- !nzchar(trimws(as.character(design$target)))
+  design$target[missing_target] <- as.character(design$mark[missing_target])
+  design$cell_type[!nzchar(trimws(as.character(design$cell_type)))] <- "all"
   design
 }
 
@@ -3976,6 +4043,155 @@ submit_cutrun_peakqc_job <- function(project) {
     project, "Peak QC", script,
     c(seacr_dir, bowtie2_dir, outdir, project$name),
     "cutrun_peak_qc", "consensus peaks + FRiP", sample = "", target = target, reference = "SEACR peaks and Bowtie2 BAMs"
+  )
+}
+
+cutrun_alignment_values <- function(project, sample) {
+  path <- cutrun_bowtie2_complete_marker(project, sample)
+  lines <- read_metric_lines(path)
+  value <- function(key, default = "") {
+    hit <- grep(paste0("^", key, "\\t"), lines, value = TRUE)
+    if (!length(hit)) return(default)
+    parts <- strsplit(hit[[1]], "\t", fixed = TRUE)[[1]]
+    trimws(parts[[2]] %||% default)
+  }
+  c(
+    dedup_mode = value("dedup_mode", "keepdup"),
+    normalization_mode = tolower(value("normalization_mode", "none")),
+    spikein_name = value("spikein_name", CUTRUN_DEFAULT_SPIKEIN_NAME)
+  )
+}
+
+cutrun_bowtie2_signal_bam <- function(project, sample) {
+  metrics <- cutrun_alignment_values(project, sample)
+  suffix <- if (identical(metrics[["dedup_mode"]], "dedup")) "Aligned.sortedByCoord_removeDup.out.bam" else "Aligned.sortedByCoord.out.bam"
+  file.path(project$data_dir, "bowtie2", sample, paste0(sample, suffix))
+}
+
+cutrun_spikein_bam <- function(project, sample) {
+  metrics <- cutrun_alignment_values(project, sample)
+  if (!identical(metrics[["normalization_mode"]], "spikein")) return("")
+  file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_", metrics[["spikein_name"]], ".bam"))
+}
+
+cutrun_seacr_peak_path <- function(project, sample) {
+  sample_dir <- file.path(project$data_dir, "seacr", sample)
+  preferred <- c(
+    file.path(sample_dir, paste0(sample, ".stringent.bed")),
+    file.path(sample_dir, paste0(sample, ".relaxed.bed"))
+  )
+  hit <- preferred[file.exists(preferred) & vapply(preferred, file_size_for, numeric(1)) > 0]
+  if (length(hit)) return(hit[[1]])
+  if (dir.exists(sample_dir)) {
+    hit <- list.files(sample_dir, pattern = "\\.(stringent|relaxed)\\.bed$", full.names = TRUE)
+    hit <- hit[vapply(hit, file_size_for, numeric(1)) > 0]
+    if (length(hit)) return(sort(hit)[[1]])
+  }
+  preferred[[1]]
+}
+
+cutrun_diffbind_conditions <- function(project) {
+  design <- cutrun_target_design(project, include_controls = FALSE)
+  if (!NROW(design)) return(character(0))
+  values <- unique(trimws(as.character(design$condition)))
+  values <- values[nzchar(values)]
+  preferred <- values[tolower(values) %in% c("veh", "vehicle", "control", "ctrl", "untreated")]
+  c(preferred, setdiff(sort(values), preferred))
+}
+
+cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_replicates = 2L) {
+  design <- cutrun_target_design(project, include_controls = FALSE)
+  if (!NROW(design)) stop("No non-control CUT&RUN samples were found in design_matrix.txt.")
+  reference_condition <- trimws(as.character(reference_condition %||% ""))
+  if (!nzchar(reference_condition)) stop("Choose a reference condition for differential peak analysis.")
+
+  blank_mark <- !nzchar(trimws(as.character(design$mark)))
+  blank_condition <- !nzchar(trimws(as.character(design$condition)))
+  blank_replicate <- !nzchar(trimws(as.character(design$replicate)))
+  if (any(blank_mark)) stop("Every non-control sample needs a mark value (for example pCreb, Creb, H3K27ac, or H3K4me3). Missing: ", paste(design$sample[blank_mark], collapse = ", "))
+  if (any(blank_condition)) stop("Every non-control sample needs a condition value. Missing: ", paste(design$sample[blank_condition], collapse = ", "))
+  if (any(blank_replicate)) stop("Every non-control sample needs a biological replicate value. Missing: ", paste(design$sample[blank_replicate], collapse = ", "))
+  if (anyDuplicated(design$sample)) stop("Sample names must be unique before differential peak analysis.")
+
+  rows <- lapply(seq_len(NROW(design)), function(i) {
+    sample <- as.character(design$sample[[i]])
+    metrics <- cutrun_alignment_values(project, sample)
+    data.frame(
+      SampleID = sample,
+      CellType = trimws(as.character(design$cell_type[[i]] %||% "all")),
+      Mark = trimws(as.character(design$mark[[i]])),
+      Condition = trimws(as.character(design$condition[[i]])),
+      Replicate = trimws(as.character(design$replicate[[i]])),
+      bamReads = cutrun_bowtie2_signal_bam(project, sample),
+      Peaks = cutrun_seacr_peak_path(project, sample),
+      Spikein = cutrun_spikein_bam(project, sample),
+      normalization_mode = metrics[["normalization_mode"]],
+      stringsAsFactors = FALSE
+    )
+  })
+  sheet <- do.call(rbind, rows)
+  sheet$CellType[!nzchar(sheet$CellType)] <- "all"
+
+  missing_inputs <- unique(c(
+    sheet$bamReads[!file.exists(sheet$bamReads) | vapply(sheet$bamReads, file_size_for, numeric(1)) <= 0],
+    sheet$Peaks[!file.exists(sheet$Peaks) | vapply(sheet$Peaks, file_size_for, numeric(1)) <= 0]
+  ))
+  spike_expected <- sheet$normalization_mode == "spikein"
+  missing_spike <- sheet$Spikein[spike_expected & (!file.exists(sheet$Spikein) | vapply(sheet$Spikein, file_size_for, numeric(1)) <= 0)]
+  missing_inputs <- unique(c(missing_inputs, missing_spike))
+  missing_inputs <- missing_inputs[nzchar(missing_inputs)]
+  if (length(missing_inputs)) stop(paste(c("Run Bowtie2 and SEACR successfully for every target sample first. Missing or empty inputs:", missing_inputs), collapse = "\n"))
+
+  group_key <- paste(sheet$CellType, sheet$Mark, sep = "__")
+  required_replicates <- max(2L, suppressWarnings(as.integer(min_replicates)))
+  analyzable <- vapply(split(seq_len(NROW(sheet)), group_key), function(idx) {
+    tab <- table(sheet$Condition[idx])
+    length(tab) >= 2L && reference_condition %in% names(tab) && tab[[reference_condition]] >= required_replicates && any(tab[setdiff(names(tab), reference_condition)] >= required_replicates)
+  }, logical(1))
+  if (!any(analyzable)) {
+    stop("No cell type/mark group has at least ", required_replicates, " biological replicates in the reference and comparison conditions. Under-replicated groups will not be tested.")
+  }
+
+  out_dir <- file.path(project$data_dir, "manifest", "cutrun_diffbind")
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  path <- file.path(out_dir, "resolved_samples.tsv")
+  utils::write.table(sheet, path, sep = "\t", row.names = FALSE, quote = FALSE)
+  path
+}
+
+submit_cutrun_diffbind_job <- function(project, reference_condition, min_replicates = 2L) {
+  min_replicates <- suppressWarnings(as.integer(min_replicates))
+  if (!is.finite(min_replicates) || min_replicates < 1L) min_replicates <- 2L
+  sample_sheet <- tryCatch(
+    cutrun_diffbind_sample_sheet(project, reference_condition, min_replicates),
+    error = function(e) e
+  )
+  if (inherits(sample_sheet, "error")) {
+    return(record_preflight_failure(project, "Differential Peaks", conditionMessage(sample_sheet), "cutrun_diffbind"))
+  }
+
+  outdir <- file.path(project$data_dir, "cutrun_diffbind")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  target <- file.path(outdir, "_COMPLETE")
+  if (file.exists(target)) return("Differential Peaks is already complete. Delete its data first to force a rerun.")
+  jobs <- job_history(project)
+  active <- if (NROW(jobs) && all(c("step", "slurm_state") %in% names(jobs))) {
+    jobs[canonical_job_step(jobs$step) == "Differential Peaks" & jobs$slurm_state %in% active_slurm_states(), , drop = FALSE]
+  } else data.frame()
+  if (NROW(active)) return("Differential Peaks is already active for this project.")
+
+  qsub <- file.path(SCRIPTS_DIR, "DiffBind", "qsub_cutrun_diffbind.sh")
+  runner <- file.path(SCRIPTS_DIR, "DiffBind", "cutrun_diffbind.sh")
+  r_script <- file.path(SCRIPTS_DIR, "DiffBind", "cutrun_diffbind.R")
+  missing_scripts <- c(qsub, runner, r_script)[!file.exists(c(qsub, runner, r_script))]
+  if (length(missing_scripts)) {
+    return(record_preflight_failure(project, "Differential Peaks", paste("CodeSpringLab CUT&RUN DiffBind scripts are missing:", paste(missing_scripts, collapse = ", ")), "cutrun_diffbind"))
+  }
+  submit_sbatch(
+    project, "Differential Peaks", qsub,
+    c(r_script, sample_sheet, outdir, reference_condition, min_replicates, genome_species(project), runner),
+    "cutrun_diffbind", paste("mark-aware; reference", reference_condition, "; replicate support", min_replicates),
+    target = target, reference = paste("SEACR + DiffBind/DESeq2;", genome_species(project))
   )
 }
 
@@ -4524,6 +4740,7 @@ run_step_meta <- function(project = NULL) {
       "Align fragments with Bowtie2 and create BAM/bedGraph/bigWig outputs.",
       "Call sparse CUT&RUN peaks with SEACR.",
       "Build consensus SEACR peaks, peak counts, and FRiP summaries.",
+      "Build mark-specific consensus peaks and run DiffBind/DESeq2 differential binding.",
       "Optional MACS2 peak calling for comparison or broad histone marks."
     )
   } else {
@@ -6019,7 +6236,10 @@ server <- function(input, output, session) {
 
   observeEvent(input$scan_fastqs, {
     p <- current_project()
-    design_state(scan_fastqs(p$fastq_dir, p$paired_end, metadata_cols_from_input()))
+    is_cutrun <- is_cutrun_project(p)
+    scanned <- scan_fastqs(p$fastq_dir, p$paired_end, metadata_cols_from_input(), infer_samples = is_cutrun)
+    if (is_cutrun) scanned <- infer_cutrun_metadata(scanned)
+    design_state(scanned)
   })
 
   observeEvent(input$add_metadata_col, {
@@ -6260,6 +6480,13 @@ server <- function(input, output, session) {
         tool_panel("Peak QC", status, "Build SEACR consensus peaks, a consensus peak count matrix, and FRiP summaries.",
           tags$p(class = "muted small-note", "Run after SEACR. This mirrors nf-core-style peak-level summaries in a lightweight CodeSpringLab format."),
           "run_cutrun_peakqc", "Submit Peak QC"),
+        tool_panel("Differential Peaks", status, "Build mark-specific reproducible consensus peaks and test differential binding with DiffBind/DESeq2.",
+          tagList(
+            uiOutput("cutrun_diffbind_reference_ui"),
+            numericInput("cutrun_diffbind_min_replicates", "Replicates supporting each condition consensus", value = 2, min = 1, step = 1),
+            tags$p(class = "muted small-note", "The design matrix must specify cell_type, mark, condition, replicate, and control_sample. Each cell type/mark is analyzed separately. Native SEACR widths are preserved; E. coli BAMs are reused automatically when spike-in normalization was selected for Bowtie2.")
+          ),
+          "run_cutrun_diffbind", "Submit Differential Peaks"),
         tool_panel("MACS2 (optional)", status, "Optional MACS2 peak calling for comparison or broad histone-mark peaks.",
           tagList(
             textInput("cutrun_macs2_qvalue", "MACS2 q-value cutoff", value = input$cutrun_macs2_qvalue %||% "0.01"),
@@ -6302,6 +6529,20 @@ server <- function(input, output, session) {
       tool_panel("Kallisto (optional)", status, "Optional transcript abundance quantification from raw or trimmed reads.",
         tagList(checkboxInput("kallisto_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$kallisto_use_trimmed)))),
         "run_kallisto", "Submit Kallisto")
+    )
+  })
+
+  output$cutrun_diffbind_reference_ui <- renderUI({
+    p <- current_project()
+    if (!is_cutrun_project(p)) return(NULL)
+    conditions <- cutrun_diffbind_conditions(p)
+    if (!length(conditions)) return(div(class = "empty-box", "Add condition values to the CUT&RUN design matrix first."))
+    current <- input$cutrun_diffbind_reference %||% conditions[[1]]
+    selectInput(
+      "cutrun_diffbind_reference", "Reference condition",
+      choices = conditions,
+      selected = selected_choice(current, conditions, conditions[[1]]),
+      selectize = FALSE
     )
   })
 
@@ -6415,6 +6656,15 @@ server <- function(input, output, session) {
       "Peak QC",
       submit_cutrun_peakqc_job(current_project()),
       "consensus peaks + FRiP"
+    )
+  })
+  observeEvent(input$run_cutrun_diffbind, {
+    reference <- input$cutrun_diffbind_reference %||% ""
+    support <- input$cutrun_diffbind_min_replicates %||% 2
+    run_submission(
+      "Differential Peaks",
+      submit_cutrun_diffbind_job(current_project(), reference, support),
+      paste("mark-aware; reference", reference, "; replicate support", support)
     )
   })
   observeEvent(input$run_cutrun_macs2, {
@@ -6750,11 +7000,45 @@ server <- function(input, output, session) {
     req(input$cutrun_macs2_peak_file)
     safe_read_result_table(input$cutrun_macs2_peak_file, 5000)
   }, page_length = 50)
+  output$cutrun_diffbind_comparison_ui <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
+    progress_refresh()
+    dirs <- cutrun_diffbind_result_dirs(current_project())
+    if (!length(dirs)) return(div(class = "empty-box", "No completed CUT&RUN differential comparisons were found yet."))
+    labels <- gsub("__", " — ", basename(dirs), fixed = TRUE)
+    choices <- stats::setNames(dirs, labels)
+    selectInput(
+      "cutrun_diffbind_result_dir", "Comparison",
+      choices = choices,
+      selected = selected_choice(input$cutrun_diffbind_result_dir, dirs, dirs[[1]]),
+      selectize = FALSE
+    )
+  })
+  selected_cutrun_diffbind_dir <- reactive({
+    path <- input$cutrun_diffbind_result_dir %||% ""
+    req(nzchar(path), dir.exists(path))
+    path
+  })
+  output$cutrun_diffbind_summary <- render_csl_table({
+    cutrun_diffbind_summary_table(current_project())
+  }, page_length = 25)
+  output$cutrun_diffbind_results <- render_csl_table({
+    safe_read_table(file.path(selected_cutrun_diffbind_dir(), "all_differential_peaks.tsv"), 20000)
+  }, page_length = 50, scroll_y = "620px")
+  output$cutrun_diffbind_pca_ui <- renderUI({
+    image_or_file_ui(file.path(selected_cutrun_diffbind_dir(), "pca_normalized_counts.png"), "760px")
+  })
+  output$cutrun_diffbind_volcano_ui <- renderUI({
+    image_or_file_ui(file.path(selected_cutrun_diffbind_dir(), "volcano_differential_peaks.png"), "760px")
+  })
+  output$cutrun_diffbind_heatmap_ui <- renderUI({
+    image_or_file_ui(file.path(selected_cutrun_diffbind_dir(), "differential_peak_heatmap.png"), "760px")
+  })
   output$cutrun_file_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
     p <- current_project()
-    choices <- result_file_choices(p, c("bowtie2", "seacr", "macs2", "cutrun_peak_qc"), "\\.(bed|bedgraph|bw|txt|tsv|csv|png|pdf|html|narrowPeak|broadPeak)$")
+    choices <- result_file_choices(p, c("bowtie2", "seacr", "macs2", "cutrun_peak_qc", "cutrun_diffbind"), "\\.(bed|bedgraph|bw|txt|tsv|csv|png|pdf|html|narrowPeak|broadPeak)$")
     if (!length(choices)) return(div(class = "empty-box", "No CUT&RUN result files were found yet."))
     selectInput("cutrun_file", "CUT&RUN result file", choices = choices, selected = selected_choice(input$cutrun_file, choices, choices[[1]]), selectize = FALSE)
   })
