@@ -984,6 +984,28 @@ deseq_design_for_column <- function(project, compare_col) {
   out
 }
 
+atac_diffbind_design <- function(project, compare_col, subset_col = "", subset_value = "") {
+  df <- project_design_df(project)
+  if (!NROW(df)) stop("No design matrix found.")
+  if (!compare_col %in% names(df)) stop("Selected comparison column is not in design matrix: ", compare_col)
+  subset_col <- trimws(as.character(subset_col %||% ""))
+  subset_value <- trimws(as.character(subset_value %||% ""))
+  if (nzchar(subset_col)) {
+    if (!subset_col %in% names(df)) stop("Selected subset column is not in design matrix: ", subset_col)
+    if (!nzchar(subset_value)) stop("Choose a subset value for ", subset_col, ".")
+    df <- df[trimws(as.character(df[[subset_col]])) == subset_value, , drop = FALSE]
+    if (!NROW(df)) stop("No samples match ", subset_col, " = ", subset_value, ".")
+  }
+  if (!"filename" %in% names(df)) df$filename <- df$sample
+  keep <- df[, c("sample", compare_col, "filename"), drop = FALSE]
+  scope <- if (nzchar(subset_col)) paste(subset_col, subset_value, sep = "_") else "all_samples"
+  out_dir <- file.path(project$data_dir, "manifest", "atac_diffbind", clean_name(scope), clean_name(compare_col))
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  out <- file.path(out_dir, "design_matrix.txt")
+  utils::write.table(keep, out, sep = "\t", row.names = FALSE, quote = FALSE)
+  out
+}
+
 count_files <- function(path, pattern) {
   if (!dir.exists(path)) return(0)
   length(list.files(path, pattern = pattern, recursive = TRUE, full.names = TRUE))
@@ -4291,9 +4313,14 @@ submit_atac_macs2_jobs <- function(project, qvalue = "0.05") {
   paste(append_plan_message(messages, plan), collapse = "\n")
 }
 
-submit_atac_diffbind_job <- function(project, compare_col, reference, comparison) {
+submit_atac_diffbind_job <- function(project, compare_col, reference, comparison, subset_col = "", subset_value = "") {
   design <- project_design_df(project)
   if (!NROW(design) || !nzchar(compare_col) || !compare_col %in% names(design)) return(record_preflight_failure(project, "Differential Peaks", "Select a valid ATAC-seq comparison variable from design_matrix.txt.", "diffbind"))
+  subset_col <- trimws(as.character(subset_col %||% "")); subset_value <- trimws(as.character(subset_value %||% ""))
+  if (nzchar(subset_col)) {
+    if (!subset_col %in% names(design) || !nzchar(subset_value)) return(record_preflight_failure(project, "Differential Peaks", "Select a valid ATAC-seq subset before running DiffBind.", "diffbind"))
+    design <- design[trimws(as.character(design[[subset_col]])) == subset_value, , drop = FALSE]
+  }
   tab <- table(as.character(design[[compare_col]]))
   if (!all(c(reference, comparison) %in% names(tab)) || any(tab[c(reference, comparison)] < 2L)) return(record_preflight_failure(project, "Differential Peaks", "DiffBind requires at least two biological replicates in both selected conditions.", "diffbind"))
   res <- atac_reference_resources(project)
@@ -4301,16 +4328,18 @@ submit_atac_diffbind_job <- function(project, compare_col, reference, comparison
   required <- c(qsub, runner, rscript, if (genome_species(project) == "mouse") res$blacklist else character(0))
   missing_resources <- required[!file.exists(required)]
   if (length(missing_resources)) return(record_preflight_failure(project, "Differential Peaks", paste("Required ATAC-seq DiffBind resources are missing:", paste(missing_resources, collapse = ", ")), "diffbind"))
-  comparison_design <- deseq_design_for_column(project, compare_col)
+  comparison_design <- atac_diffbind_design(project, compare_col, subset_col, subset_value)
   design_dir <- dirname(comparison_design)
   if (genome_species(project) == "mouse") file.copy(res$blacklist, file.path(design_dir, "mm39-blacklist.bed"), overwrite = TRUE)
-  slug <- clean_name(paste0(comparison, "_vs_", reference), "comparison")
+  display_reference <- if (nzchar(subset_value)) paste(subset_value, reference, sep = "_") else reference
+  display_comparison <- if (nzchar(subset_value)) paste(subset_value, comparison, sep = "_") else comparison
+  slug <- clean_name(paste0(display_comparison, "_vs_", display_reference), "comparison")
   outdir <- file.path(project$data_dir, "diffbind", slug); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   target <- file.path(outdir, paste0("DifferentialPeaks_", comparison, "_vs_", reference, "_ref_annotated_with_stats.txt"))
   if (file.exists(target)) return("This ATAC-seq DiffBind comparison is already complete. Delete its data first to rerun.")
   submit_sbatch(project, "Differential Peaks", qsub,
     c(rscript, outdir, design_dir, file.path(project$data_dir, "macs2"), reference, comparison, genome_species(project), file.path(project$data_dir, "bowtie2"), runner),
-    "diffbind_atac", paste(compare_col, comparison, "vs", reference, "GRCm39/M39"), target = target, reference = res$label)
+    "diffbind_atac", paste(if (nzchar(subset_col)) paste0(subset_col, "=", subset_value, ";") else "all samples;", compare_col, comparison, "vs", reference, "GRCm39/M39"), target = target, reference = res$label)
 }
 
 submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_fragment = 1000,
@@ -6962,22 +6991,42 @@ server <- function(input, output, session) {
 
   output$atac_diffbind_controls_ui <- renderUI({
     p <- current_project(); if (!is_atac_project(p)) return(NULL)
+    design <- project_design_df(p)
     cols <- design_compare_columns(p)
     if (!length(cols)) return(div(class = "empty-box", "Add a comparison variable such as condition or day to the ATAC-seq design matrix."))
-    compare_col <- selected_choice(input$atac_diffbind_column, cols, if ("condition" %in% cols) "condition" else cols[[1]])
-    values <- design_compare_values(p, compare_col)
+    subset_candidates <- cols[vapply(cols, function(col) length(unique(trimws(as.character(design[[col]][nzchar(trimws(as.character(design[[col]])))])))) >= 1L, logical(1))]
+    subset_default <- if ("cell_type" %in% subset_candidates) "cell_type" else ""
+    subset_col <- as.character(input$atac_diffbind_subset_col %||% subset_default)
+    if (!subset_col %in% c("", subset_candidates)) subset_col <- subset_default
+    subset_values <- if (nzchar(subset_col)) unique(trimws(as.character(design[[subset_col]]))) else character(0)
+    subset_values <- subset_values[nzchar(subset_values)]
+    subset_value <- if (length(subset_values)) selected_choice(input$atac_diffbind_subset_value, subset_values, subset_values[[1]]) else ""
+    scoped_design <- if (nzchar(subset_col) && nzchar(subset_value)) design[trimws(as.character(design[[subset_col]])) == subset_value, , drop = FALSE] else design
+    subset_controls <- tagList(
+      selectInput("atac_diffbind_subset_col", "Analyze within", choices = c("All samples" = "", stats::setNames(subset_candidates, subset_candidates)), selected = subset_col, selectize = FALSE),
+      if (nzchar(subset_col)) selectInput("atac_diffbind_subset_value", "Subset", choices = subset_values, selected = subset_value, selectize = FALSE) else NULL
+    )
+    compare_cols <- setdiff(cols, subset_col)
+    if (!length(compare_cols)) return(tagList(subset_controls, div(class = "empty-box", "Add another metadata column, such as condition, to define the comparison.")))
+    compare_col <- selected_choice(input$atac_diffbind_column, compare_cols, if ("condition" %in% compare_cols) "condition" else compare_cols[[1]])
+    values <- sort(unique(trimws(as.character(scoped_design[[compare_col]]))))
+    values <- values[nzchar(values)]
     if (length(values) < 2L) return(tagList(
-      selectInput("atac_diffbind_column", "Comparison variable", choices = cols, selected = compare_col, selectize = FALSE),
+      subset_controls,
+      selectInput("atac_diffbind_column", "Comparison variable", choices = compare_cols, selected = compare_col, selectize = FALSE),
       div(class = "empty-box", "The selected variable needs at least two values.")
     ))
     preferred <- values[tolower(values) %in% c("veh", "vehicle", "control", "ctrl", "untreated")]
     ref_default <- if (length(preferred)) preferred[[1]] else values[[1]]
     ref <- selected_choice(input$atac_diffbind_reference, values, ref_default)
     comp <- selected_choice(input$atac_diffbind_comparison, setdiff(values, ref), setdiff(values, ref)[[1]])
+    value_labels <- function(x) if (nzchar(subset_value)) stats::setNames(x, paste(subset_value, x, sep = "_")) else x
     tagList(
-      selectInput("atac_diffbind_column", "Comparison variable", choices = cols, selected = compare_col, selectize = FALSE),
-      selectInput("atac_diffbind_reference", "Reference condition", choices = values, selected = ref, selectize = FALSE),
-      selectInput("atac_diffbind_comparison", "Comparison condition", choices = setdiff(values, ref), selected = comp, selectize = FALSE)
+      subset_controls,
+      selectInput("atac_diffbind_column", "Comparison variable", choices = compare_cols, selected = compare_col, selectize = FALSE),
+      selectInput("atac_diffbind_reference", "Reference condition", choices = value_labels(values), selected = ref, selectize = FALSE),
+      selectInput("atac_diffbind_comparison", "Comparison condition", choices = value_labels(setdiff(values, ref)), selected = comp, selectize = FALSE),
+      tags$p(class = "muted small-note", paste(NROW(scoped_design), "samples in this subset."))
     )
   })
 
@@ -7109,7 +7158,11 @@ server <- function(input, output, session) {
     run_submission("MACS2 Peaks", submit_atac_macs2_jobs(current_project(), input$atac_macs2_qvalue %||% "0.05"), "shift -100; extsize 200")
   })
   observeEvent(input$run_atac_diffbind, {
-    run_submission("Differential Peaks", submit_atac_diffbind_job(current_project(), input$atac_diffbind_column %||% "", input$atac_diffbind_reference %||% "", input$atac_diffbind_comparison %||% ""), paste(input$atac_diffbind_comparison, "vs", input$atac_diffbind_reference))
+    run_submission(
+      "Differential Peaks",
+      submit_atac_diffbind_job(current_project(), input$atac_diffbind_column %||% "", input$atac_diffbind_reference %||% "", input$atac_diffbind_comparison %||% "", input$atac_diffbind_subset_col %||% "", input$atac_diffbind_subset_value %||% ""),
+      paste(if (nzchar(input$atac_diffbind_subset_value %||% "")) paste0(input$atac_diffbind_subset_value, ":") else "", input$atac_diffbind_comparison, "vs", input$atac_diffbind_reference)
+    )
   })
   observeEvent(input$run_cutrun_seacr, {
     run_submission(
