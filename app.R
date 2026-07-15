@@ -2050,8 +2050,32 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     )
     modes <- last_job_modes_from_jobs(jobs)
     raw$input <- unname(modes[raw$step]); raw$input[is.na(raw$input)] <- ""; raw$detail <- ""
+    if (is.null(progress)) progress <- tryCatch(sample_progress(project, active_states, data.frame(), jobs = jobs)$table, error = function(e) data.frame())
+    if (NROW(progress)) {
+      for (step in sample_level_steps_for_project(project)) {
+        hit <- progress[progress$step == step, , drop = FALSE]
+        if (!NROW(hit)) next
+        if (any(hit$status == "Likely failed, Deleted")) {
+          raw$status[raw$step == step] <- "Likely failed, Deleted"
+        } else if (any(hit$status == "Cancelled, Deleted")) {
+          raw$status[raw$step == step] <- "Cancelled, Deleted"
+        } else if (all(hit$status %in% c("Completed, Deleted", "Optional, not run")) && any(hit$status == "Completed, Deleted")) {
+          raw$status[raw$step == step] <- "Completed, Deleted"
+        } else if (any(hit$status == "Cancelled")) {
+          raw$status[raw$step == step] <- "Cancelled"
+        } else if (any(hit$status %in% c("Running", "Running, no growth yet", "Waiting"))) {
+          raw$status[raw$step == step] <- "Active"
+        } else if (all(hit$status %in% c("Completed", "Optional, not run")) && any(hit$status == "Completed")) {
+          raw$status[raw$step == step] <- "Complete"
+        } else if (any(hit$status == "Likely failed")) {
+          raw$status[raw$step == step] <- "Likely failed"
+        } else {
+          raw$status[raw$step == step] <- "Not started"
+        }
+      }
+    }
     active <- names(active_states)
-    raw$status[raw$step %in% active & raw$status != "Complete"] <- "Active"
+    raw$status[raw$step %in% active] <- "Active"
     raw$status <- normalize_pipeline_status(raw$status)
     return(raw)
   }
@@ -2109,7 +2133,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
       }
     }
     active <- names(active_states)
-    raw$status[raw$step %in% active & !raw$status %in% c("Complete", "Cancelled", "Likely failed", "Completed, Deleted", "Likely failed, Deleted", "Cancelled, Deleted")] <- "Active"
+    raw$status[raw$step %in% active] <- "Active"
     raw$status <- normalize_pipeline_status(raw$status)
     return(raw)
   }
@@ -2189,7 +2213,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
     }
   }
   active <- names(active_states)
-  raw$status[raw$step %in% active & !raw$status %in% c("Complete", "Cancelled", "Likely failed", "Completed, Deleted", "Likely failed, Deleted", "Cancelled, Deleted")] <- "Active"
+  raw$status[raw$step %in% active] <- "Active"
   if (!feature_matrix_exists && feature_count_files > 0) raw$status[raw$step == "featureCounts"] <- "Active"
   raw$status <- normalize_pipeline_status(raw$status)
   raw
@@ -2941,20 +2965,20 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         deleted_status
       } else if (slurm_cancelled) {
         "Cancelled"
-      } else if (error_signal && !active && !complete_outputs) {
-        "Likely failed"
-      } else if ((complete_outputs || (slurm_complete && size > 0)) && !growing && !slurm_running) {
-        "Completed"
       } else if (slurm_running) {
-        "Running"
-      } else if (active && growing) {
         "Running"
       } else if (slurm_waiting) {
         "Waiting"
+      } else if (active && growing) {
+        "Running"
       } else if (active && size > 0) {
         "Running, no growth yet"
       } else if (active) {
         "Waiting"
+      } else if (error_signal && !complete_outputs) {
+        "Likely failed"
+      } else if (complete_outputs || (slurm_complete && size > 0)) {
+        "Completed"
       } else if (size > 0 && size < min_size) {
         "Likely failed"
       } else if (optional) {
