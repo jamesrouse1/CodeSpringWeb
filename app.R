@@ -1213,7 +1213,13 @@ job_history <- function(project, force_refresh = FALSE) {
   jobs$slurm_job_name <- ""
   ids <- unique(jobs$job_id[nzchar(jobs$job_id)])
   if (length(ids) && nzchar(Sys.which("squeue"))) {
-    sq <- tryCatch(suppressWarnings(system2("squeue", c("-h", "-j", paste(ids, collapse = ","), "-o", "%A|%T|%M|%j"), stdout = TRUE, stderr = FALSE, timeout = 10)), error = function(e) character(0))
+    queue_user <- Sys.getenv("USER", unset = Sys.info()[["user"]] %||% "")
+    queue_args <- if (nzchar(queue_user)) {
+      c("-h", "-u", queue_user, "-o", "%A|%T|%M|%j")
+    } else {
+      c("-h", "-j", paste(ids, collapse = ","), "-o", "%A|%T|%M|%j")
+    }
+    sq <- tryCatch(suppressWarnings(system2("squeue", queue_args, stdout = TRUE, stderr = FALSE, timeout = 10)), error = function(e) character(0))
     sq <- sq[nzchar(sq)]
     if (length(sq)) {
       parts <- strsplit(sq, "|", fixed = TRUE)
@@ -6801,7 +6807,7 @@ server <- function(input, output, session) {
       return(invisible(NULL))
     }
     p <- current_project()
-    jobs <- carry_forward_job_elapsed(job_history(p), isolate(job_history_state()))
+    jobs <- carry_forward_job_elapsed(job_history(p, force_refresh = TRUE), isolate(job_history_state()))
     matrix_path <- file.path(p$data_dir, "counts", "count_matrix.txt")
     autosubmitted <- featurecounts_matrix_autosubmitted()
     if (
@@ -6917,7 +6923,7 @@ server <- function(input, output, session) {
       tryCatch(
         {
           mark_submission_active(label, input_mode, samples)
-          jobs_now <- job_history(current_project())
+          jobs_now <- job_history(current_project(), force_refresh = TRUE)
           job_history_state(carry_forward_job_elapsed(jobs_now, isolate(job_history_state())))
           progress_refresh(Sys.time())
         },
