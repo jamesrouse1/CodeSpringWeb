@@ -4683,10 +4683,25 @@ append_plan_message <- function(messages, plan) {
   if (nzchar(notes)) c(messages, notes) else messages
 }
 
-submit_fastqc_jobs <- function(project, trimmed = FALSE) {
+requested_sample_subset <- function(project, available, samples = NULL, step = "pipeline step") {
+  available <- unique(trimws(as.character(available %||% character(0))))
+  available <- available[nzchar(available)]
+  if (is.null(samples)) return(available)
+  requested <- unique(trimws(as.character(samples %||% character(0))))
+  requested <- requested[nzchar(requested)]
+  if (!length(requested)) stop("Select at least one sample for ", step, ".")
+  unknown <- setdiff(requested, available)
+  if (length(unknown)) stop("Selected samples are not present in the current design: ", paste(unknown, collapse = ", "))
+  intersect(available, requested)
+}
+
+submit_fastqc_jobs <- function(project, trimmed = FALSE, samples = NULL) {
   outdir <- file.path(project$data_dir, if (trimmed) "fastqc_cutadapt" else "fastqc")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, trimmed)
+  selected <- tryCatch(requested_sample_subset(project, pairs$sample, samples, "FastQC"), error = function(e) e)
+  if (inherits(selected, "error")) return(record_preflight_failure(project, "FastQC", conditionMessage(selected), "fastQC"))
+  pairs <- pairs[pairs$sample %in% selected, , drop = FALSE]
   msg <- missing_read_message(project, pairs, trimmed)
   if (nzchar(msg)) return(record_preflight_failure(project, "FastQC", msg, "fastQC"))
   targets <- split(seq_len(NROW(pairs)), pairs$sample)
@@ -4713,10 +4728,13 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE) {
   paste(append_plan_message(commands, plan), collapse = "\n")
 }
 
-submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length) {
+submit_cutadapt_jobs <- function(project, adapter1, adapter2, min_length, samples = NULL) {
   outdir <- file.path(project$data_dir, "cutadapt")
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pairs <- sample_fastq_pairs(project, FALSE)
+  selected <- tryCatch(requested_sample_subset(project, pairs$sample, samples, "Cutadapt"), error = function(e) e)
+  if (inherits(selected, "error")) return(record_preflight_failure(project, "Cutadapt", conditionMessage(selected), "cutadapt"))
+  pairs <- pairs[pairs$sample %in% selected, , drop = FALSE]
   msg <- missing_read_message(project, pairs, FALSE)
   if (nzchar(msg)) return(record_preflight_failure(project, "Cutadapt", msg, "cutadapt"))
   target_list <- lapply(split(seq_len(NROW(pairs)), pairs$sample), function(idx) {
@@ -4986,13 +5004,16 @@ submit_atac_postprocess_jobs <- function(project, samples) {
   paste(messages, collapse = "\n")
 }
 
-submit_atac_bowtie2_jobs <- function(project, trimmed = TRUE) {
+submit_atac_bowtie2_jobs <- function(project, trimmed = TRUE, samples = NULL) {
   if (!isTRUE(project$paired_end)) return(record_preflight_failure(project, "Bowtie2", "The established CodeSpringLab ATAC-seq workflow requires paired-end FASTQs.", "bowtie2"))
   res <- atac_reference_resources(project)
   index_exists <- file.exists(paste0(res$bowtie2_index, ".1.bt2")) || file.exists(paste0(res$bowtie2_index, ".1.bt2l"))
   missing_ref <- c(if (!index_exists) paste0(res$bowtie2_index, ".1.bt2[|l]"), if (!file.exists(res$chrom_sizes)) res$chrom_sizes)
   if (length(missing_ref)) return(record_preflight_failure(project, "Bowtie2", paste("ATAC-seq reference files are missing:", paste(missing_ref, collapse = ", ")), "bowtie2"))
   pairs <- sample_fastq_pairs(project, trimmed)
+  selected <- tryCatch(requested_sample_subset(project, pairs$sample, samples, "ATAC-seq Bowtie2"), error = function(e) e)
+  if (inherits(selected, "error")) return(record_preflight_failure(project, "Bowtie2", conditionMessage(selected), "bowtie2"))
+  pairs <- pairs[pairs$sample %in% selected, , drop = FALSE]
   msg <- missing_read_message(project, pairs, trimmed)
   if (nzchar(msg)) return(record_preflight_failure(project, "Bowtie2", msg, "bowtie2"))
   outdir <- file.path(project$data_dir, "bowtie2"); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
@@ -5014,10 +5035,13 @@ submit_atac_bowtie2_jobs <- function(project, trimmed = TRUE) {
   paste(append_plan_message(messages, plan), collapse = "\n")
 }
 
-submit_atac_macs2_jobs <- function(project, qvalue = "0.05") {
+submit_atac_macs2_jobs <- function(project, qvalue = "0.05", samples = NULL) {
   res <- atac_reference_resources(project)
   design <- project_design_df(project)
   if (!NROW(design) || !"sample" %in% names(design)) return(record_preflight_failure(project, "MACS2 Peaks", "No samples found in design_matrix.txt.", "macs2"))
+  selected <- tryCatch(requested_sample_subset(project, design$sample, samples, "ATAC-seq MACS2"), error = function(e) e)
+  if (inherits(selected, "error")) return(record_preflight_failure(project, "MACS2 Peaks", conditionMessage(selected), "macs2"))
+  design <- design[design$sample %in% selected, , drop = FALSE]
   outdir <- file.path(project$data_dir, "macs2"); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   targets <- stats::setNames(lapply(design$sample, function(s) file.path(outdir, s, paste0(s, "_peaks.narrowPeak"))), design$sample)
   plan <- sample_submission_plan(project, "MACS2 Peaks", targets)
@@ -8105,12 +8129,14 @@ server <- function(input, output, session) {
       nextera1 <- unname(r1_choices[["Nextera Transposase ATAC"]]); nextera2 <- unname(r2_choices[["Nextera Transposase ATAC"]])
       return(div(class = "run-grid",
         tool_panel("Cutadapt", status, "Trim ATAC-seq adapters and short reads.", tagList(
+          uiOutput("atac_cutadapt_samples_ui"),
           selectInput("cutadapt_adapter1", "R1 adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, nextera1), selectize = FALSE),
           selectInput("cutadapt_adapter2", "R2 adapter", choices = r2_choices, selected = selected_choice(input$cutadapt_adapter2, r2_choices, nextera2), selectize = FALSE),
           textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
         ), "run_cutadapt", "Submit cutadapt"),
-        tool_panel("FastQC", status, "Quality reports for raw or trimmed ATAC-seq reads.", tagList(checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$fastqc_use_trimmed)))), "run_fastqc", "Submit FastQC"),
+        tool_panel("FastQC", status, "Quality reports for raw or trimmed ATAC-seq reads.", tagList(uiOutput("atac_fastqc_samples_ui"), checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$fastqc_use_trimmed)))), "run_fastqc", "Submit FastQC"),
         tool_panel("Bowtie2", status, "Align paired-end ATAC fragments to the GRCm39/GENCODE M39 index, remove duplicates, and create CPM bigWigs scaled to one million mapped reads.", tagList(
+          uiOutput("atac_bowtie2_samples_ui"),
           checkboxInput("atac_bowtie2_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$atac_bowtie2_use_trimmed))),
           tags$p(class = "muted small-note", atac_reference_resources(p)$bowtie2_index)
         ), "run_atac_bowtie2", "Submit Bowtie2"),
@@ -8118,7 +8144,7 @@ server <- function(input, output, session) {
           uiOutput("atac_postprocess_controls_ui"),
           tags$p(class = "muted small-note", "The app uses a lightweight 24 GB job when only the BAM index or CPM bigWig needs repair. Missing Picard, BED, or insert-size outputs trigger the full 96 GB post-alignment repair. Outputs are replaced only after validation succeeds.")
         ), "run_atac_postprocess", "Repair selected samples", status_step = "Bowtie2", show_sample_progress = FALSE, show_job_actions = FALSE),
-        tool_panel("MACS2 Peaks", status, "Call shifted ATAC-seq peaks and generate TSS heatmaps and Homer annotations.", tagList(textInput("atac_macs2_qvalue", "MACS2 q-value", value = input$atac_macs2_qvalue %||% "0.05")), "run_atac_macs2", "Submit MACS2"),
+        tool_panel("MACS2 Peaks", status, "Call shifted ATAC-seq peaks and generate TSS heatmaps and Homer annotations.", tagList(uiOutput("atac_macs2_samples_ui"), textInput("atac_macs2_qvalue", "MACS2 q-value", value = input$atac_macs2_qvalue %||% "0.05")), "run_atac_macs2", "Submit MACS2"),
         tool_panel("Differential Peaks", status, "Build the DiffBind consensus peakset and test differential accessibility.", tagList(uiOutput("atac_diffbind_controls_ui"), tags$p(class = "muted small-note", "Requires at least two biological replicates per selected condition.")), "run_atac_diffbind", "Submit DiffBind", data.frame())
       ))
     }
@@ -8342,9 +8368,29 @@ server <- function(input, output, session) {
     project_level_step_summary_ui(current_project(), job_history_state(), "GSEA")
   })
 
+  atac_sample_selector <- function(input_id, label) {
+    p <- current_project()
+    if (!is_atac_project(p)) return(NULL)
+    design <- project_design_df(p)
+    samples <- if (NROW(design) && "sample" %in% names(design)) unique(trimws(as.character(design$sample))) else character(0)
+    samples <- samples[nzchar(samples)]
+    if (!length(samples)) return(div(class = "empty-box", "No included samples were found in the saved design matrix."))
+    current <- input[[input_id]]
+    selected <- if (is.null(current)) samples else intersect(as.character(current), samples)
+    selectizeInput(input_id, label, choices = samples, selected = selected, multiple = TRUE,
+      options = list(plugins = list("remove_button"), placeholder = "Select samples"))
+  }
+
+  output$atac_cutadapt_samples_ui <- renderUI(atac_sample_selector("atac_cutadapt_samples", "Samples to trim"))
+  output$atac_fastqc_samples_ui <- renderUI(atac_sample_selector("atac_fastqc_samples", "Samples for QC"))
+  output$atac_bowtie2_samples_ui <- renderUI(atac_sample_selector("atac_bowtie2_samples", "Samples to align"))
+  output$atac_macs2_samples_ui <- renderUI(atac_sample_selector("atac_macs2_samples", "Samples for peak calling"))
+
   observeEvent(input$run_fastqc, {
     trimmed <- isTRUE(input$fastqc_use_trimmed)
-    run_submission("FastQC", submit_fastqc_jobs(current_project(), trimmed), if (trimmed) "trimmed reads" else "raw reads")
+    p <- current_project()
+    samples <- if (is_atac_project(p)) input$atac_fastqc_samples %||% character(0) else NULL
+    run_submission("FastQC", submit_fastqc_jobs(p, trimmed, samples), if (trimmed) "trimmed reads" else "raw reads", samples = samples)
   })
   observeEvent(input$run_cutadapt, {
     adapter1 <- selected_adapter_value(input$cutadapt_adapter1, input$cutadapt_adapter1_custom)
@@ -8355,7 +8401,9 @@ server <- function(input, output, session) {
       set_tool_message("Cutadapt", "")
       finish_submit_refresh()
     } else {
-      run_submission("Cutadapt", submit_cutadapt_jobs(current_project(), adapter1, adapter2, input$cutadapt_min_length), "raw reads")
+      p <- current_project()
+      samples <- if (is_atac_project(p)) input$atac_cutadapt_samples %||% character(0) else NULL
+      run_submission("Cutadapt", submit_cutadapt_jobs(p, adapter1, adapter2, input$cutadapt_min_length, samples), "raw reads", samples = samples)
       updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "kallisto_use_trimmed", value = TRUE)
@@ -8408,14 +8456,16 @@ server <- function(input, output, session) {
   })
   observeEvent(input$run_atac_bowtie2, {
     trimmed <- isTRUE(input$atac_bowtie2_use_trimmed)
-    run_submission("Bowtie2", submit_atac_bowtie2_jobs(current_project(), trimmed), paste(if (trimmed) "trimmed" else "raw", "ATAC reads; M39 index"))
+    samples <- input$atac_bowtie2_samples %||% character(0)
+    run_submission("Bowtie2", submit_atac_bowtie2_jobs(current_project(), trimmed, samples), paste(if (trimmed) "trimmed" else "raw", "ATAC reads; M39 index"), samples = samples)
   })
   observeEvent(input$run_atac_postprocess, {
     samples <- input$atac_postprocess_samples %||% character(0)
     run_submission("Bowtie2", submit_atac_postprocess_jobs(current_project(), samples), paste("post-alignment repair:", paste(samples, collapse = ", ")), samples = samples)
   })
   observeEvent(input$run_atac_macs2, {
-    run_submission("MACS2 Peaks", submit_atac_macs2_jobs(current_project(), input$atac_macs2_qvalue %||% "0.05"), "shift -100; extsize 200")
+    samples <- input$atac_macs2_samples %||% character(0)
+    run_submission("MACS2 Peaks", submit_atac_macs2_jobs(current_project(), input$atac_macs2_qvalue %||% "0.05", samples), "shift -100; extsize 200", samples = samples)
   })
   observeEvent(input$run_atac_diffbind, {
     run_submission(
