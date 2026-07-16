@@ -3001,9 +3001,56 @@ atac_alignment_summary_table <- function(project) {
   files <- if (dir.exists(root)) list.files(root, pattern = "_alignment_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
   rows <- lapply(sort(files), function(path) {
     x <- metric_file_to_named_list(path); if (!length(x)) return(NULL)
-    as.data.frame(as.list(c(sample = x$sample %||% basename(dirname(path)), mapped_reads = x$mapped_reads %||% "", deduplicated_reads = x$deduplicated_reads %||% "", bigwig_normalization = x$bigwig_normalization %||% "", bigwig = x$bigwig %||% "")), stringsAsFactors = FALSE)
+    mapped <- suppressWarnings(as.numeric(x$mapped_reads %||% NA_character_))
+    deduplicated <- suppressWarnings(as.numeric(x$deduplicated_reads %||% NA_character_))
+    retained <- if (is.finite(mapped) && mapped > 0 && is.finite(deduplicated)) sprintf("%.1f%%", 100 * deduplicated / mapped) else ""
+    as.data.frame(as.list(c(
+      sample = x$sample %||% basename(dirname(path)),
+      mapped_reads = x$mapped_reads %||% "",
+      deduplicated_reads = x$deduplicated_reads %||% "",
+      reads_retained_after_deduplication = retained,
+      bigwig_normalization = x$bigwig_normalization %||% "",
+      bigwig = x$bigwig %||% ""
+    )), stringsAsFactors = FALSE)
   })
   rows <- Filter(Negate(is.null), rows); if (length(rows)) do.call(rbind, rows) else data.frame()
+}
+
+atac_summary_cards_ui <- function(project) {
+  design <- project_design_df(project)
+  alignment <- atac_alignment_summary_table(project)
+  mapped <- if (NROW(alignment) && "mapped_reads" %in% names(alignment)) clean_metric_number(alignment$mapped_reads) else numeric(0)
+  mapped <- mapped[is.finite(mapped)]
+  peak_files <- result_file_choices(project, "macs2", "\\.(narrowPeak|broadPeak)$")
+  diffbind_root <- file.path(project$data_dir, "diffbind")
+  comparisons <- if (dir.exists(diffbind_root)) list.dirs(diffbind_root, recursive = FALSE, full.names = TRUE) else character(0)
+  comparisons <- comparisons[vapply(comparisons, function(path) length(list.files(path, pattern = "^DifferentialPeaks_.*\\.txt$")) > 0, logical(1))]
+  completed_postprocess <- atac_postprocess_status_table(project)
+  completed_postprocess <- if (NROW(completed_postprocess)) sum(completed_postprocess$status == "Complete") else 0L
+  assay <- if (is_chip_project(project)) "ChIP-seq" else "ATAC-seq"
+  div(class = "cutrun-metric-grid",
+    cutrun_metric_card("Samples", format_metric_value(NROW(design)), "Included in the saved design matrix", "blue"),
+    cutrun_metric_card("Alignment summaries", format_metric_value(NROW(alignment)), paste(assay, "Bowtie2 outputs"), "green"),
+    cutrun_metric_card("Median mapped reads", if (length(mapped)) format_metric_value(stats::median(mapped)) else "—", paste(length(mapped), "completed summaries"), "gold"),
+    cutrun_metric_card("Post-alignment complete", format_metric_value(completed_postprocess), "Validated sample output sets", "purple"),
+    cutrun_metric_card("MACS2 peak files", format_metric_value(length(peak_files)), "Completed peak calls", "blue"),
+    cutrun_metric_card("Differential comparisons", format_metric_value(length(comparisons)), "Completed DiffBind folders", "green")
+  )
+}
+
+atac_files_by_category <- function(project, category = "all") {
+  category <- category %||% "all"
+  files <- switch(category,
+    qc = unlist(lapply(file.path(project$data_dir, c("fastqc", "fastqc_cutadapt")), function(path) if (dir.exists(path)) list.files(path, pattern = "\\.(html|zip)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)), use.names = FALSE),
+    alignment = result_file_choices(project, "bowtie2", "\\.(bam|bai|txt|jpg|jpeg|png|pdf)$"),
+    signal = result_file_choices(project, "bowtie2", "\\.(bw|bedgraph|bdg)$"),
+    peaks = result_file_choices(project, "macs2", "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv|png|pdf)$"),
+    differential = result_file_choices(project, "diffbind", "\\.(bed|txt|tsv|csv|png|pdf|rds)$"),
+    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "macs2", "diffbind"), "\\.(html|zip|bam|bai|bw|bedgraph|bdg|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
+  )
+  files <- unname(files)
+  files <- sort(unique(files[file.exists(files)]))
+  stats::setNames(files, relative_result_labels(project, files))
 }
 
 atac_postprocess_status_table <- function(project) {
@@ -3049,7 +3096,7 @@ atac_results_explorer_ui <- function() {
   div(class = "native-results-host cutrun-results-host", div(class = "app-shell cutrun-results-shell",
     div(class = "hero cutrun-results-hero", div(class = "hero-copy", h1(class = "hero-title", "ATAC-seq Results Explorer"), div(class = "hero-kicker", "GRCm39/GENCODE M39 accessibility analysis"))),
     div(class = "main-tabs", tabsetPanel(id = "atac_results_tabs",
-      tabPanel("Overview", br(), actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"), tags$h4("Pipeline status"), table_output("results_overview"), results_design_matrix_ui("Samples, conditions, cell types, and replicates used by ATAC-seq peak and differential-accessibility analyses.")),
+      tabPanel("Overview", br(), actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"), uiOutput("atac_summary_cards"), tags$h4("Pipeline status"), table_output("results_overview"), results_design_matrix_ui("Samples, conditions, cell types, and replicates used by ATAC-seq peak and differential-accessibility analyses.")),
       tabPanel("QC", br(), tabsetPanel(id = "atac_qc_tabs",
         tabPanel("Initial QC", br(), sidebarLayout(
           sidebarPanel(width = 2, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
@@ -3092,6 +3139,7 @@ chip_results_explorer_ui <- function() {
     div(class = "main-tabs", tabsetPanel(id = "chip_results_tabs",
       tabPanel("Overview", br(),
         actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"),
+        uiOutput("atac_summary_cards"),
         tags$h4("Pipeline status"),
         table_output("results_overview"),
         results_design_matrix_ui("Samples, targets, conditions, replicates, and matched input controls used by ChIP-seq analyses.")
@@ -8782,6 +8830,10 @@ server <- function(input, output, session) {
     cutrun_qc_report_ui(current_project(), input$atac_qc_sample %||% "", "R2", "screen", isTRUE(input$atac_qc_show_trimmed))
   })
   output$atac_alignment_summary <- render_csl_table(atac_alignment_summary_table(current_project()), page_length = 50)
+  output$atac_summary_cards <- renderUI({
+    progress_refresh()
+    atac_summary_cards_ui(current_project())
+  })
   output$atac_postprocess_status <- render_csl_table(atac_postprocess_status_table(current_project()), page_length = 50)
   output$atac_insert_size_ui <- renderUI({
     progress_refresh(); p <- current_project(); files <- if (dir.exists(file.path(p$data_dir, "bowtie2"))) list.files(file.path(p$data_dir, "bowtie2"), pattern = "_insert_size_histogram\\.jpg$", recursive = TRUE, full.names = TRUE) else character(0)
@@ -8807,8 +8859,17 @@ server <- function(input, output, session) {
   output$atac_diffbind_pca_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_pca_byNormCounts.png"), "620px") })
   output$atac_diffbind_volcano_ui <- renderUI({ image_or_file_ui(file.path(selected_atac_diffbind_dir(), "diffbind_volcano_byDiffPeaks.png"), "620px") })
   output$atac_file_ui <- renderUI({
-    progress_refresh(); choices <- result_file_choices(current_project(), c("bowtie2", "macs2", "diffbind"), "\\.(bed|bedgraph|bdg|bw|bam|bai|txt|tsv|csv|png|jpg|pdf|xls|narrowPeak)$")
-    if (!length(choices)) return(div(class = "empty-box", "No ATAC-seq result files found yet.")); selectInput("atac_file", "ATAC-seq result file", choices = choices, selected = selected_choice(input$atac_file, choices, choices[[1]]), selectize = FALSE)
+    progress_refresh()
+    p <- current_project()
+    categories <- c("All files" = "all", "QC reports" = "qc", "Alignment" = "alignment", "Signal tracks" = "signal", "Peaks" = "peaks", "Differential results" = "differential")
+    category <- selected_choice(input$atac_file_category, categories, "all")
+    choices <- atac_files_by_category(p, category)
+    assay <- if (is_chip_project(p)) "ChIP-seq" else "ATAC-seq"
+    tagList(
+      selectInput("atac_file_category", "File category", choices = categories, selected = category, selectize = FALSE),
+      if (!length(choices)) div(class = "empty-box", paste("No", assay, "files found in this category yet.")) else
+        selectInput("atac_file", paste(assay, "result file"), choices = choices, selected = selected_choice(input$atac_file, choices, choices[[1]]), selectize = FALSE)
+    )
   })
   output$atac_file_view <- renderUI({ req(input$atac_file); if (tolower(tools::file_ext(input$atac_file)) %in% c("txt","tsv","csv","bed","bdg","xls","narrowpeak")) table_output("atac_selected_table") else image_or_file_ui(input$atac_file, "850px") })
   output$atac_selected_table <- render_csl_table({ req(input$atac_file); safe_read_result_table(input$atac_file, 10000) }, page_length = 50)
