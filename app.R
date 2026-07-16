@@ -2107,12 +2107,14 @@ tool_reference_summary <- function(project) {
       file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_chip_SE.sh")
     ))
     macs2_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "MACS2", "macs2_chip_SE.sh"))
+    diffbind_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "DiffBind", "diffbind_chip.sh"), "R/DiffBind library used by CodeSpringLab")
     rows <- list(
       c("Reference", "ChIP-seq genome reference", ref$label, paste0(genome_species(project), " / ", genome_reference_key(project)), "Bowtie2 and MACS2", paste("Bowtie2 index:", ref$bowtie2_index, "| Chrom sizes:", ref$chrom_sizes)),
       c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Selected samples are submitted independently; completed and active samples are skipped."),
       c("Tool", "cutadapt", cutadapt_modules, "Adapter trimming", "Raw FASTQ", "Adapter presets and minimum length are selected in Run Pipeline."),
       c("Tool", "Bowtie2", bowtie2_modules, "ChIP and input alignment", ref$label, "Supports paired- and single-end reads, MAPQ filtering, PCR duplicate removal, and direct CPM bigWig generation. Temporary files are stored within each project."),
-      c("Tool", "MACS2", macs2_modules, "Matched-input ChIP peak calling", "Duplicate-removed target and input BAMs", "Every target must explicitly identify a reference=input row in control_sample. Paired-end data use BAMPE; single-end data use BAM. Narrow or broad peaks and q-value are selected per run.")
+      c("Tool", "MACS2", macs2_modules, "Matched-input ChIP peak calling", "Duplicate-removed target and input BAMs", "Every target must explicitly identify a reference=input row in control_sample. Paired-end data use BAMPE; single-end data use BAM. Narrow or broad peaks and q-value are selected per run."),
+      c("Tool", "DiffBind/DESeq2", diffbind_modules, "Differential ChIP binding", "Target-only MACS2 peaks and ChIP BAMs", "Input controls are excluded from the DiffBind sample sheet because they were applied during MACS2 peak calling. At least two ChIP target replicates are required per selected condition.")
     )
     out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
     colnames(out) <- c("Type", "Name", "Version/reference", "Used for", "Input/reference", "Parameters/settings")
@@ -2186,7 +2188,7 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     "Cutadapt" = paste0("Adapter trimming was performed with cutadapt.", mode_text),
     "Bowtie2" = paste0(if (is_atac_project(project)) "ATAC-seq fragments were aligned with Bowtie2 and duplicate-removed CPM bigWigs scaled to one million mapped reads were generated." else if (is_chip_project(project)) "ChIP-seq target and input reads were aligned with Bowtie2; PCR duplicates were removed and CPM bigWigs were generated." else "CUT&RUN fragments were aligned with Bowtie2.", ref_text, mode_text),
     "SEACR" = paste0("CUT&RUN peaks were called with SEACR from fragment bedGraphs using the selected global default and any per-sample seacr_stringency overrides. Target class was recorded separately and did not automatically change stringency.", ref_text, mode_text),
-    "Differential Peaks" = paste0(if (is_atac_project(project)) "Differential accessibility was tested on a MACS2 consensus peakset using DiffBind with DESeq2." else "Differential CUT&RUN binding was tested separately by cell type and mark using DiffBind with DESeq2. Native SEACR intervals were preserved and spike-in BAMs were reused automatically when available.", ref_text, mode_text),
+    "Differential Peaks" = paste0(if (is_atac_project(project)) "Differential accessibility was tested on a MACS2 consensus peakset using DiffBind with DESeq2." else if (is_chip_project(project)) "Differential ChIP binding was tested with DiffBind using target-only MACS2 peaks and ChIP BAMs; matched inputs were applied during peak calling and were not counted as replicates." else "Differential CUT&RUN binding was tested separately by cell type and mark using DiffBind with DESeq2. Native SEACR intervals were preserved and spike-in BAMs were reused automatically when available.", ref_text, mode_text),
     "MACS2 Peaks" = paste0(if (is_chip_project(project)) "ChIP-seq peaks were called with MACS2 against explicitly matched input controls using paired- or single-end mode as appropriate." else "ATAC-seq peaks were called with MACS2 using Tn5-aware shifting and annotated with Homer.", ref_text, mode_text),
     "MACS2 (optional)" = paste0("Optional CUT&RUN peaks were called with MACS2.", ref_text, mode_text),
     "STAR" = paste0("Reads were aligned with STAR using ", gencode_label(project), ".", ref_text, mode_text),
@@ -2495,7 +2497,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "bowtie2"), "_alignment_summary\\.txt$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started",
-        if (count_files(file.path(data_dir, "diffbind"), "DifferentialPeaks_.*\\.txt$") > 0) "Complete" else "Not started"
+        if (if (is_chip_project(project)) count_files(file.path(data_dir, "diffbind"), "^_COMPLETE$") > 0 else count_files(file.path(data_dir, "diffbind"), "DifferentialPeaks_.*\\.txt$") > 0) "Complete" else "Not started"
       ),
       path = c(design, file.path(data_dir, "cutadapt"), file.path(data_dir, "fastqc"), file.path(data_dir, "bowtie2"), file.path(data_dir, "macs2"), file.path(data_dir, "diffbind")),
       stringsAsFactors = FALSE
@@ -5260,6 +5262,77 @@ submit_chip_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "narrow
       sample = sample, target = file.path(sample_dir, paste0(sample, "_macs2_complete.txt")), reference = res$label)
   }, character(1))
   paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+chip_macs2_peak_file <- function(project, sample) {
+  sample_dir <- file.path(project$data_dir, "macs2", sample)
+  summary <- metric_file_to_named_list(file.path(sample_dir, paste0(sample, "_macs2_summary.txt")))
+  recorded <- as.character(summary$peak_file %||% "")
+  if (nzchar(recorded) && file.exists(recorded) && file_size_for(recorded) > 0) return(recorded)
+  candidates <- file.path(sample_dir, paste0(sample, c("_peaks.narrowPeak", "_peaks.broadPeak")))
+  candidates <- candidates[file.exists(candidates) & vapply(candidates, file_size_for, numeric(1)) > 0]
+  if (length(candidates) == 1L) candidates[[1]] else ""
+}
+
+submit_chip_diffbind_job <- function(project, compare_col, reference, comparison, subset_col = "", subset_value = "") {
+  design <- chip_target_design(project)
+  if (!NROW(design) || !nzchar(compare_col) || !compare_col %in% names(design)) return(record_preflight_failure(project, "Differential Peaks", "Select a valid ChIP-seq comparison variable from target rows in design_matrix.txt.", "diffbind_chip"))
+  subset_col <- trimws(as.character(subset_col %||% ""))
+  subset_value <- trimws(as.character(subset_value %||% ""))
+  if (nzchar(subset_col)) {
+    if (!subset_col %in% names(design) || !nzchar(subset_value)) return(record_preflight_failure(project, "Differential Peaks", "Select a valid ChIP-seq subset before running DiffBind.", "diffbind_chip"))
+    design <- design[trimws(as.character(design[[subset_col]])) == subset_value, , drop = FALSE]
+  }
+  design <- design[trimws(as.character(design[[compare_col]])) %in% c(reference, comparison), , drop = FALSE]
+  counts <- table(trimws(as.character(design[[compare_col]])))
+  if (!all(c(reference, comparison) %in% names(counts)) || any(counts[c(reference, comparison)] < 2L)) return(record_preflight_failure(project, "Differential Peaks", "ChIP DiffBind requires at least two target replicates in both selected conditions; input-control rows are not counted as replicates.", "diffbind_chip"))
+
+  reference_label <- clean_name(reference, "reference")
+  comparison_label <- clean_name(comparison, "comparison")
+  if (identical(reference_label, comparison_label)) return(record_preflight_failure(project, "Differential Peaks", "The selected ChIP conditions collapse to the same safe file label. Rename one condition in the design matrix.", "diffbind_chip"))
+  peak_files <- vapply(as.character(design$sample), function(sample) chip_macs2_peak_file(project, sample), character(1))
+  bam_files <- file.path(project$data_dir, "bowtie2", design$sample, paste0(design$sample, "Aligned.sortedByCoord_removeDup.out.bam"))
+  missing_samples <- design$sample[!nzchar(peak_files) | !file.exists(bam_files) | vapply(bam_files, file_size_for, numeric(1)) <= 0]
+  if (length(missing_samples)) return(record_preflight_failure(project, "Differential Peaks", paste("Complete ChIP Bowtie2 and MACS2 for every target before DiffBind. Missing or ambiguous results for:", paste(missing_samples, collapse = ", ")), "diffbind_chip"))
+
+  condition <- trimws(as.character(design[[compare_col]]))
+  safe_condition <- ifelse(condition == reference, reference_label, comparison_label)
+  replicate <- ave(seq_along(safe_condition), safe_condition, FUN = seq_along)
+  sample_sheet <- data.frame(
+    SampleID = as.character(design$sample),
+    Condition = safe_condition,
+    Replicate = as.integer(replicate),
+    bamReads = bam_files,
+    Peaks = peak_files,
+    PeakCaller = ifelse(grepl("narrowPeak$", peak_files), "narrow", "bed"),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  slug_parts <- c(if (nzchar(subset_value)) subset_value, comparison_label, "vs", reference_label)
+  slug <- clean_name(paste(slug_parts, collapse = "_"), "comparison")
+  outdir <- file.path(project$data_dir, "diffbind", slug)
+  manifest_dir <- file.path(project$data_dir, "manifest", "chip_diffbind", slug)
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(manifest_dir, recursive = TRUE, showWarnings = FALSE)
+  sample_sheet_path <- file.path(manifest_dir, "chip_diffbind_samples.tsv")
+  sample_sheet_tmp <- paste0(sample_sheet_path, ".tmp.", Sys.getpid())
+  utils::write.table(sample_sheet, sample_sheet_tmp, sep = "\t", row.names = FALSE, quote = FALSE)
+  if (!file.rename(sample_sheet_tmp, sample_sheet_path)) return(record_preflight_failure(project, "Differential Peaks", paste("Could not save the ChIP DiffBind sample sheet:", sample_sheet_path), "diffbind_chip"))
+
+  qsub <- file.path(SCRIPTS_DIR, "DiffBind", "qsub_diffbind_chip.sh")
+  runner <- file.path(SCRIPTS_DIR, "DiffBind", "diffbind_chip.sh")
+  rscript <- file.path(SCRIPTS_DIR, "DiffBind", "DiffBind_chip.R")
+  res <- chip_reference_resources(project)
+  blacklist <- if (identical(genome_species(project), "mouse")) res$blacklist else "none"
+  required <- c(qsub, runner, rscript, if (!identical(blacklist, "none")) blacklist else character(0))
+  missing_resources <- required[!file.exists(required)]
+  if (length(missing_resources)) return(record_preflight_failure(project, "Differential Peaks", paste("Required ChIP DiffBind resources are missing:", paste(missing_resources, collapse = ", ")), "diffbind_chip"))
+  target <- file.path(outdir, paste0("DifferentialPeaks_", comparison_label, "_vs_", reference_label, "_ref_annotated_with_stats.txt"))
+  if (file.exists(target) && file_size_for(target) > 0) return("This ChIP-seq DiffBind comparison is already complete. Delete its data first to rerun.")
+  submit_sbatch(project, "Differential Peaks", qsub,
+    c(rscript, outdir, sample_sheet_path, reference_label, comparison_label, genome_species(project), blacklist, runner),
+    "diffbind_chip", paste(if (nzchar(subset_col)) paste0(subset_col, "=", subset_value, ";") else "all targets;", compare_col, comparison, "vs", reference),
+    target = target, reference = res$label)
 }
 
 submit_atac_diffbind_job <- function(project, compare_col, reference, comparison, subset_col = "", subset_value = "") {
@@ -8255,11 +8328,10 @@ server <- function(input, output, session) {
           selectInput("chip_macs2_peak_type", "Peak type", choices = c("Narrow peaks" = "narrow", "Broad peaks" = "broad"), selected = selected_choice(input$chip_macs2_peak_type, c("narrow", "broad"), "narrow"), selectize = FALSE),
           tags$p(class = "muted small-note", "Only reference=chip rows are listed. Every target must name a reference=input row in control_sample; ambiguous controls are never guessed.")
         ), "run_chip_macs2", "Submit MACS2"),
-        div(class = "tool-card",
-          tags$h4("Differential Peaks"),
-          tags$p("ChIP-specific differential binding is the next pipeline increment."),
-          tags$p(class = "muted small-note", "Existing peak and alignment results are already available in Results Explorer. DiffBind submission remains disabled until target/input-aware sample-sheet generation is validated.")
-        )
+        tool_panel("Differential Peaks", status, "Test differential ChIP binding from completed target-only MACS2 peaks and ChIP BAMs.", tagList(
+          uiOutput("atac_diffbind_controls_ui"),
+          tags$p(class = "muted small-note", "Input controls are excluded from the DiffBind replicate count. Each condition requires at least two ChIP target libraries; MACS2 has already applied each target's matched input control.")
+        ), "run_chip_diffbind", "Submit DiffBind", data.frame())
       ))
     }
     if (is_cutrun_project(p)) {
@@ -8444,10 +8516,12 @@ server <- function(input, output, session) {
   })
 
   output$atac_diffbind_controls_ui <- renderUI({
-    p <- current_project(); if (!is_atac_project(p)) return(NULL)
-    design <- project_design_df(p)
+    p <- current_project(); if (!is_atac_project(p) && !is_chip_project(p)) return(NULL)
+    design <- if (is_chip_project(p)) chip_target_design(p) else project_design_df(p)
+    assay <- if (is_chip_project(p)) "ChIP-seq" else "ATAC-seq"
     cols <- design_compare_columns(p)
-    if (!length(cols)) return(div(class = "empty-box", "Add a comparison variable such as condition or day to the ATAC-seq design matrix."))
+    if (is_chip_project(p)) cols <- intersect(cols, names(design))
+    if (!length(cols)) return(div(class = "empty-box", paste("Add a comparison variable such as condition or treatment to the", assay, "design matrix.")))
     subset_candidates <- cols[vapply(cols, function(col) length(unique(trimws(as.character(design[[col]][nzchar(trimws(as.character(design[[col]])))])))) >= 1L, logical(1))]
     subset_default <- if ("cell_type" %in% subset_candidates) "cell_type" else ""
     subset_col <- as.character(input$atac_diffbind_subset_col %||% subset_default)
@@ -8480,7 +8554,7 @@ server <- function(input, output, session) {
       selectInput("atac_diffbind_column", "Comparison variable", choices = compare_cols, selected = compare_col, selectize = FALSE),
       selectInput("atac_diffbind_reference", "Reference condition", choices = value_labels(values), selected = ref, selectize = FALSE),
       selectInput("atac_diffbind_comparison", "Comparison condition", choices = value_labels(setdiff(values, ref)), selected = comp, selectize = FALSE),
-      tags$p(class = "muted small-note", paste(NROW(scoped_design), "samples in this subset."))
+      tags$p(class = "muted small-note", paste(NROW(scoped_design), if (is_chip_project(p)) "ChIP target samples in this subset." else "samples in this subset."))
     )
   })
 
@@ -8718,6 +8792,13 @@ server <- function(input, output, session) {
     run_submission(
       "Differential Peaks",
       submit_atac_diffbind_job(current_project(), input$atac_diffbind_column %||% "", input$atac_diffbind_reference %||% "", input$atac_diffbind_comparison %||% "", input$atac_diffbind_subset_col %||% "", input$atac_diffbind_subset_value %||% ""),
+      paste(if (nzchar(input$atac_diffbind_subset_value %||% "")) paste0(input$atac_diffbind_subset_value, ":") else "", input$atac_diffbind_comparison, "vs", input$atac_diffbind_reference)
+    )
+  })
+  observeEvent(input$run_chip_diffbind, {
+    run_submission(
+      "Differential Peaks",
+      submit_chip_diffbind_job(current_project(), input$atac_diffbind_column %||% "", input$atac_diffbind_reference %||% "", input$atac_diffbind_comparison %||% "", input$atac_diffbind_subset_col %||% "", input$atac_diffbind_subset_value %||% ""),
       paste(if (nzchar(input$atac_diffbind_subset_value %||% "")) paste0(input$atac_diffbind_subset_value, ":") else "", input$atac_diffbind_comparison, "vs", input$atac_diffbind_reference)
     )
   })
