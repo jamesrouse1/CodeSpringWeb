@@ -1052,6 +1052,24 @@ infer_atac_metadata <- function(df) {
   df
 }
 
+infer_chip_metadata <- function(df) {
+  if (!NROW(df) || !"sample" %in% names(df)) return(df)
+  for (col in c("treatment", "reference", "condition", "replicate", "control_sample")) if (!col %in% names(df)) df[[col]] <- ""
+  samples <- trimws(as.character(df$sample))
+  for (i in seq_len(NROW(df))) {
+    sample <- samples[[i]]
+    lower <- tolower(sample)
+    if (!nzchar(trimws(as.character(df$reference[[i]])))) {
+      df$reference[[i]] <- if (grepl("input|igg|control", lower)) "input" else "chip"
+    }
+    hit <- regmatches(sample, regexec("^(.*?)(?:[_-](?:rep)?)?([0-9]+)$", sample, perl = TRUE, ignore.case = TRUE))[[1]]
+    if (length(hit) == 3L && !nzchar(trimws(as.character(df$replicate[[i]])))) df$replicate[[i]] <- hit[[3]]
+    if (!nzchar(trimws(as.character(df$condition[[i]]))) && nzchar(trimws(as.character(df$treatment[[i]])))) df$condition[[i]] <- trimws(as.character(df$treatment[[i]]))
+  }
+  df$reference <- tolower(trimws(as.character(df$reference)))
+  df
+}
+
 sync_metadata_columns <- function(df, metadata_cols) {
   if (!NROW(df)) {
     df <- data.frame(include = logical(), sample = character(), filename = character(), status = character())
@@ -1179,6 +1197,17 @@ write_design_matrix <- function(project, df, metadata_cols) {
     keep$target_class <- tolower(trimws(as.character(keep$target_class)))
     keep$seacr_stringency <- tolower(trimws(as.character(keep$seacr_stringency)))
   }
+  if (is_chip_project(project)) {
+    keep <- infer_chip_metadata(keep)
+    invalid_reference <- !keep$reference %in% c("chip", "input")
+    if (any(invalid_reference)) stop("Invalid ChIP-seq reference for: ", paste(keep$sample[invalid_reference], collapse = ", "), ". Use chip or input.")
+    target_rows <- keep$reference == "chip"
+    missing_control <- target_rows & !nzchar(trimws(as.character(keep$control_sample)))
+    if (any(missing_control)) stop("Every ChIP target must name its matched input in control_sample. Missing for: ", paste(keep$sample[missing_control], collapse = ", "))
+    control_index <- match(as.character(keep$control_sample[target_rows]), as.character(keep$sample))
+    invalid_control <- is.na(control_index) | keep$reference[control_index] != "input"
+    if (any(invalid_control)) stop("These ChIP targets have a missing or non-input control_sample: ", paste(keep$sample[target_rows][invalid_control], collapse = ", "))
+  }
   out <- results_design_matrix_path(project)
   dir.create(dirname(out), recursive = TRUE, showWarnings = FALSE)
   keep <- keep[, c("sample", metadata_cols, "filename"), drop = FALSE]
@@ -1209,6 +1238,7 @@ design_editor_from_project <- function(project, metadata_cols = NULL) {
       df$include <- TRUE
       df$status <- "saved"
       df <- df[, c("include", setdiff(names(df), c("include", "status")), "status"), drop = FALSE]
+      if (is_chip_project(project)) df <- infer_chip_metadata(df)
       return(ensure_design_metadata_columns(df, metadata_cols))
     }
   }
@@ -1781,7 +1811,7 @@ step_data_paths <- function(project, step, samples = NULL) {
     "Bowtie2" = file.path(data_dir, "bowtie2"),
     "SEACR" = file.path(data_dir, "seacr"),
     "Peak QC" = file.path(data_dir, "cutrun_peak_qc"),
-    "Differential Peaks" = file.path(data_dir, if (is_atac_project(project)) "diffbind" else "cutrun_diffbind"),
+    "Differential Peaks" = file.path(data_dir, if (is_atac_project(project) || is_chip_project(project)) "diffbind" else "cutrun_diffbind"),
     "MACS2 Peaks" = file.path(data_dir, "macs2"),
     "MACS2 (optional)" = file.path(data_dir, "macs2"),
     "featureCounts" = c(
@@ -2070,6 +2100,24 @@ tool_reference_summary <- function(project) {
     file.path(SCRIPTS_DIR, "Kallisto", "kallisto_PE.sh"),
     file.path(SCRIPTS_DIR, "Kallisto", "kallisto_SE.sh")
   ))
+  if (is_chip_project(project)) {
+    ref <- chip_reference_resources(project)
+    bowtie2_modules <- module_versions_from_scripts(c(
+      file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_chip_PE.sh"),
+      file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_chip_SE.sh")
+    ))
+    macs2_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "MACS2", "macs2_chip_SE.sh"))
+    rows <- list(
+      c("Reference", "ChIP-seq genome reference", ref$label, paste0(genome_species(project), " / ", genome_reference_key(project)), "Bowtie2 and MACS2", paste("Bowtie2 index:", ref$bowtie2_index, "| Chrom sizes:", ref$chrom_sizes)),
+      c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Selected samples are submitted independently; completed and active samples are skipped."),
+      c("Tool", "cutadapt", cutadapt_modules, "Adapter trimming", "Raw FASTQ", "Adapter presets and minimum length are selected in Run Pipeline."),
+      c("Tool", "Bowtie2", bowtie2_modules, "ChIP and input alignment", ref$label, "Supports paired- and single-end reads, MAPQ filtering, PCR duplicate removal, and direct CPM bigWig generation. Temporary files are stored within each project."),
+      c("Tool", "MACS2", macs2_modules, "Matched-input ChIP peak calling", "Duplicate-removed target and input BAMs", "Every target must explicitly identify a reference=input row in control_sample. Paired-end data use BAMPE; single-end data use BAM. Narrow or broad peaks and q-value are selected per run.")
+    )
+    out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
+    colnames(out) <- c("Type", "Name", "Version/reference", "Used for", "Input/reference", "Parameters/settings")
+    return(out)
+  }
   if (is_atac_project(project)) {
     ref <- atac_reference_resources(project)
     bowtie2_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_PE.sh"))
@@ -2136,10 +2184,10 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     step,
     "FastQC" = paste0("Read quality control was performed with FastQC.", mode_text),
     "Cutadapt" = paste0("Adapter trimming was performed with cutadapt.", mode_text),
-    "Bowtie2" = paste0(if (is_atac_project(project)) "ATAC-seq fragments were aligned with Bowtie2 and duplicate-removed CPM bigWigs scaled to one million mapped reads were generated." else "CUT&RUN fragments were aligned with Bowtie2.", ref_text, mode_text),
+    "Bowtie2" = paste0(if (is_atac_project(project)) "ATAC-seq fragments were aligned with Bowtie2 and duplicate-removed CPM bigWigs scaled to one million mapped reads were generated." else if (is_chip_project(project)) "ChIP-seq target and input reads were aligned with Bowtie2; PCR duplicates were removed and CPM bigWigs were generated." else "CUT&RUN fragments were aligned with Bowtie2.", ref_text, mode_text),
     "SEACR" = paste0("CUT&RUN peaks were called with SEACR from fragment bedGraphs using the selected global default and any per-sample seacr_stringency overrides. Target class was recorded separately and did not automatically change stringency.", ref_text, mode_text),
     "Differential Peaks" = paste0(if (is_atac_project(project)) "Differential accessibility was tested on a MACS2 consensus peakset using DiffBind with DESeq2." else "Differential CUT&RUN binding was tested separately by cell type and mark using DiffBind with DESeq2. Native SEACR intervals were preserved and spike-in BAMs were reused automatically when available.", ref_text, mode_text),
-    "MACS2 Peaks" = paste0("ATAC-seq peaks were called with MACS2 using Tn5-aware shifting and annotated with Homer.", ref_text, mode_text),
+    "MACS2 Peaks" = paste0(if (is_chip_project(project)) "ChIP-seq peaks were called with MACS2 against explicitly matched input controls using paired- or single-end mode as appropriate." else "ATAC-seq peaks were called with MACS2 using Tn5-aware shifting and annotated with Homer.", ref_text, mode_text),
     "MACS2 (optional)" = paste0("Optional CUT&RUN peaks were called with MACS2.", ref_text, mode_text),
     "STAR" = paste0("Reads were aligned with STAR using ", gencode_label(project), ".", ref_text, mode_text),
     "featureCounts" = paste0("Gene-level counts were quantified with featureCounts using the selected GTF annotation.", ref_text, mode_text),
@@ -2304,7 +2352,7 @@ log_entries <- function(project) {
     }
   }
 
-  if (is_atac_project(project) && length(design_samples)) {
+  if ((is_atac_project(project) || is_chip_project(project)) && length(design_samples)) {
     for (sample in design_samples) {
       alignment_log <- file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Log.final.out"))
       add_row("Bowtie2", "output", sample, alignment_log, paste("Bowtie2", sample, "alignment report"))
@@ -2446,7 +2494,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "bowtie2"), "_alignment_summary\\.txt$") > 0) "Complete" else "Not started",
-        if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|peaks\\.xls)$") > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "diffbind"), "DifferentialPeaks_.*\\.txt$") > 0) "Complete" else "Not started"
       ),
       path = c(design, file.path(data_dir, "cutadapt"), file.path(data_dir, "fastqc"), file.path(data_dir, "bowtie2"), file.path(data_dir, "macs2"), file.path(data_dir, "diffbind")),
@@ -2762,7 +2810,7 @@ sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed
       character(0)
     ))
   }
-  if (is_atac_project(project)) {
+  if (is_atac_project(project) || is_chip_project(project)) {
     return(switch(step,
       "Cutadapt" = {
         cutadapt_dir <- file.path(data_dir, "cutadapt")
@@ -2781,7 +2829,7 @@ sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed
         if (length(expected)) expected else file.path(cutadapt_dir, paste0(sample, ".fastq.gz"))
       },
       "Bowtie2" = file.path(data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt")),
-      "MACS2 Peaks" = file.path(data_dir, "macs2", sample, paste0(sample, "_peaks.narrowPeak")),
+      "MACS2 Peaks" = if (is_chip_project(project)) file.path(data_dir, "macs2", sample, paste0(sample, "_macs2_complete.txt")) else file.path(data_dir, "macs2", sample, paste0(sample, "_peaks.narrowPeak")),
       character(0)
     ))
   }
@@ -3572,9 +3620,11 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   cache_rows <- list()
   target_design <- if (is_cutrun_project(project)) cutrun_design(project) else design
   target_by_sample <- if ("target" %in% names(target_design)) stats::setNames(as.character(target_design$target), as.character(target_design$sample)) else setNames(rep("", NROW(target_design)), as.character(target_design$sample))
+  chip_reference_by_sample <- if (is_chip_project(project)) stats::setNames(as.character(infer_chip_metadata(design)$reference), as.character(design$sample)) else setNames(character(0), character(0))
   for (sample in as.character(design$sample)) {
     for (step in sample_steps) {
       if (is_cutrun_project(project) && step %in% c("SEACR", "MACS2 (optional)") && cutrun_control_like(target_by_sample[[sample]] %||% "")) next
+      if (is_chip_project(project) && identical(step, "MACS2 Peaks") && identical(chip_reference_by_sample[[sample]] %||% "", "input")) next
       targets <- sample_step_targets(project, sample, step, raw_pairs = raw_pairs, trimmed_pairs = trimmed_pairs)
       target <- paste(targets, collapse = "; ")
       sizes <- vapply(targets, file_size_for, numeric(1))
@@ -3824,10 +3874,10 @@ sample_level_steps_for_project <- function(project) {
 primary_run_button_id <- function(project, step) {
   if (identical(step, "Cutadapt")) return("run_cutadapt")
   if (identical(step, "FastQC")) return("run_fastqc")
-  if (identical(step, "Bowtie2")) return(if (is_cutrun_project(project)) "run_cutrun_bowtie2" else "run_atac_bowtie2")
+  if (identical(step, "Bowtie2")) return(if (is_cutrun_project(project)) "run_cutrun_bowtie2" else if (is_chip_project(project)) "run_chip_bowtie2" else "run_atac_bowtie2")
   if (identical(step, "SEACR")) return("run_cutrun_seacr")
   if (identical(step, "MACS2 (optional)")) return("run_cutrun_macs2")
-  if (identical(step, "MACS2 Peaks")) return("run_atac_macs2")
+  if (identical(step, "MACS2 Peaks")) return(if (is_chip_project(project)) "run_chip_macs2" else "run_atac_macs2")
   if (identical(step, "STAR")) return("run_star")
   if (identical(step, "featureCounts")) return("run_featurecounts")
   if (identical(step, "RSEM (optional)")) return("run_rsem")
@@ -5106,6 +5156,108 @@ submit_atac_macs2_jobs <- function(project, qvalue = "0.05", samples = NULL) {
       c(sample, bed, res$macs2_genome, res$chrom_sizes, sample_dir, res$tss_bed, qvalue, project$name, res$homer_genome, bw_dir, runner),
       "macs2_atac", paste("ATAC shift -100/extsize 200; q", qvalue), sample = sample,
       target = file.path(sample_dir, paste0(sample, "_peaks.narrowPeak")), reference = res$label)
+  }, character(1))
+  paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+chip_design <- function(project) {
+  design <- project_design_df(project)
+  if (!NROW(design) || !"sample" %in% names(design)) return(data.frame())
+  infer_chip_metadata(design)
+}
+
+chip_target_design <- function(project) {
+  design <- chip_design(project)
+  if (!NROW(design)) return(design)
+  design[design$reference == "chip", , drop = FALSE]
+}
+
+chip_control_sample_for <- function(project, sample) {
+  design <- chip_design(project)
+  if (!NROW(design) || !sample %in% design$sample) return("")
+  row <- design[design$sample == sample, , drop = FALSE][1, , drop = FALSE]
+  control <- trimws(as.character(row$control_sample %||% ""))
+  if (!nzchar(control) || !control %in% design$sample) return("")
+  control_row <- design[design$sample == control, , drop = FALSE][1, , drop = FALSE]
+  if (!identical(tolower(trimws(as.character(control_row$reference))), "input")) return("")
+  control
+}
+
+submit_chip_bowtie2_jobs <- function(project, trimmed = TRUE, samples = NULL) {
+  res <- chip_reference_resources(project)
+  index_exists <- file.exists(paste0(res$bowtie2_index, ".1.bt2")) || file.exists(paste0(res$bowtie2_index, ".1.bt2l"))
+  missing_ref <- c(if (!index_exists) paste0(res$bowtie2_index, ".1.bt2[|l]"), if (!file.exists(res$chrom_sizes)) res$chrom_sizes)
+  if (length(missing_ref)) return(record_preflight_failure(project, "Bowtie2", paste("ChIP-seq reference files are missing:", paste(missing_ref, collapse = ", ")), "bowtie2_chip"))
+  pairs <- sample_fastq_pairs(project, trimmed)
+  selected <- tryCatch(requested_sample_subset(project, pairs$sample, samples, "ChIP-seq Bowtie2"), error = function(e) e)
+  if (inherits(selected, "error")) return(record_preflight_failure(project, "Bowtie2", conditionMessage(selected), "bowtie2_chip"))
+  pairs <- pairs[pairs$sample %in% selected, , drop = FALSE]
+  msg <- missing_read_message(project, pairs, trimmed)
+  if (nzchar(msg)) return(record_preflight_failure(project, "Bowtie2", msg, "bowtie2_chip"))
+  outdir <- file.path(project$data_dir, "bowtie2")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  targets <- stats::setNames(lapply(unique(pairs$sample), function(sample) file.path(outdir, sample, paste0(sample, "_alignment_summary.txt"))), unique(pairs$sample))
+  plan <- sample_submission_plan(project, "Bowtie2", targets)
+  if (!length(plan$samples)) return(plan$message)
+  pairs <- pairs[pairs$sample %in% plan$samples, , drop = FALSE]
+  suffix <- if (isTRUE(project$paired_end)) "PE" else "SE"
+  qsub <- file.path(SCRIPTS_DIR, "bowtie2", paste0("qsub_bowtie2_chip_", suffix, ".sh"))
+  runner <- file.path(SCRIPTS_DIR, "bowtie2", paste0("bowtie2_chip_", suffix, ".sh"))
+  missing_scripts <- c(qsub, runner)[!file.exists(c(qsub, runner))]
+  if (length(missing_scripts)) return(record_preflight_failure(project, "Bowtie2", paste("CodeSpringLab ChIP-seq Bowtie2 scripts are missing:", paste(missing_scripts, collapse = ", ")), "bowtie2_chip"))
+  messages <- apply(pairs, 1, function(row) {
+    sample <- row[["sample"]]
+    sample_dir <- file.path(outdir, sample)
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    prefix <- file.path(sample_dir, sample)
+    read2 <- if (isTRUE(project$paired_end)) row[["r2"]] else row[["r1"]]
+    submit_sbatch(project, "Bowtie2", qsub,
+      c(prefix, res$bowtie2_index, row[["r1"]], read2, res$effective_genome_size, res$chrom_sizes, project$name, runner),
+      "bowtie2_chip", paste(if (trimmed) "trimmed" else "raw", if (project$paired_end) "paired-end" else "single-end", "ChIP-seq reads"),
+      sample = sample, target = paste0(prefix, "_alignment_summary.txt"), reference = res$label)
+  })
+  paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+submit_chip_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "narrow", samples = NULL) {
+  qvalue_number <- suppressWarnings(as.numeric(qvalue))
+  if (!is.finite(qvalue_number) || qvalue_number <= 0 || qvalue_number > 1) return(record_preflight_failure(project, "MACS2 Peaks", "MACS2 q-value must be a number greater than 0 and at most 1.", "macs2_chip"))
+  qvalue <- format(qvalue_number, scientific = FALSE, trim = TRUE)
+  peak_type <- selected_choice(tolower(trimws(as.character(peak_type %||% "narrow"))), c("narrow", "broad"), "narrow")
+  design <- chip_target_design(project)
+  if (!NROW(design)) return(record_preflight_failure(project, "MACS2 Peaks", "No ChIP target rows were found. Set reference=chip for target libraries.", "macs2_chip"))
+  selected <- tryCatch(requested_sample_subset(project, design$sample, samples, "ChIP-seq MACS2"), error = function(e) e)
+  if (inherits(selected, "error")) return(record_preflight_failure(project, "MACS2 Peaks", conditionMessage(selected), "macs2_chip"))
+  design <- design[design$sample %in% selected, , drop = FALSE]
+  controls <- vapply(as.character(design$sample), function(sample) chip_control_sample_for(project, sample), character(1))
+  if (any(!nzchar(controls))) return(record_preflight_failure(project, "MACS2 Peaks", paste("Each selected ChIP target must have an explicit control_sample pointing to a reference=input row. Invalid targets:", paste(design$sample[!nzchar(controls)], collapse = ", ")), "macs2_chip"))
+  res <- chip_reference_resources(project)
+  outdir <- file.path(project$data_dir, "macs2")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  targets <- stats::setNames(lapply(design$sample, function(sample) file.path(outdir, sample, paste0(sample, "_macs2_complete.txt"))), design$sample)
+  plan <- sample_submission_plan(project, "MACS2 Peaks", targets)
+  if (!length(plan$samples)) return(plan$message)
+  qsub <- file.path(SCRIPTS_DIR, "MACS2", "qsub_macs2_chip_SE.sh")
+  runner <- file.path(SCRIPTS_DIR, "MACS2", "macs2_chip_SE.sh")
+  missing_scripts <- c(qsub, runner)[!file.exists(c(qsub, runner))]
+  if (length(missing_scripts)) return(record_preflight_failure(project, "MACS2 Peaks", paste("Required ChIP-seq MACS2 scripts are missing:", paste(missing_scripts, collapse = ", ")), "macs2_chip"))
+  plan_controls <- controls[match(plan$samples, design$sample)]
+  target_bams <- file.path(project$data_dir, "bowtie2", plan$samples, paste0(plan$samples, "Aligned.sortedByCoord_removeDup.out.bam"))
+  control_bams <- file.path(project$data_dir, "bowtie2", plan_controls, paste0(plan_controls, "Aligned.sortedByCoord_removeDup.out.bam"))
+  required_bams <- unique(c(target_bams, control_bams))
+  missing_bams <- required_bams[!file.exists(required_bams) | vapply(required_bams, file_size_for, numeric(1)) <= 0]
+  if (length(missing_bams)) return(record_preflight_failure(project, "MACS2 Peaks", paste("Run ChIP-seq Bowtie2 for every selected target and matched input before MACS2. Missing or empty BAMs:", paste(missing_bams, collapse = ", ")), "macs2_chip"))
+  messages <- vapply(plan$samples, function(sample) {
+    control <- controls[match(sample, design$sample)]
+    target_bam <- file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bam"))
+    control_bam <- file.path(project$data_dir, "bowtie2", control, paste0(control, "Aligned.sortedByCoord_removeDup.out.bam"))
+    sample_dir <- file.path(outdir, sample)
+    dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
+    format <- if (isTRUE(project$paired_end)) "BAMPE" else "BAM"
+    submit_sbatch(project, "MACS2 Peaks", qsub,
+      c(sample, target_bam, control_bam, format, res$macs2_genome, qvalue, peak_type, sample_dir, runner),
+      "macs2_chip", paste("matched input", control, format, peak_type, paste0("q=", qvalue)),
+      sample = sample, target = file.path(sample_dir, paste0(sample, "_macs2_complete.txt")), reference = res$label)
   }, character(1))
   paste(append_plan_message(messages, plan), collapse = "\n")
 }
@@ -7848,6 +8000,7 @@ server <- function(input, output, session) {
     scanned <- scan_fastq_dirs(project_fastq_dirs(p), p$paired_end, metadata_cols_from_input(), infer_samples = is_cutrun || is_atac || is_chip)
     if (is_cutrun) scanned <- infer_cutrun_metadata(scanned)
     if (is_atac) scanned <- infer_atac_metadata(scanned)
+    if (is_chip) scanned <- infer_chip_metadata(scanned)
     design_state(scanned)
   })
 
@@ -8081,10 +8234,31 @@ server <- function(input, output, session) {
     r2_choices <- adapter_choices_r2()
     if (is_chip_project(p)) {
       return(div(class = "run-grid",
+        tool_panel("Cutadapt", status, "Trim adapters and short reads from selected ChIP-seq FASTQs.", tagList(
+          uiOutput("chip_cutadapt_samples_ui"),
+          selectInput("cutadapt_adapter1", "R1/read adapter", choices = r1_choices, selected = selected_choice(input$cutadapt_adapter1, r1_choices, r1_choices[[1]]), selectize = FALSE),
+          selectInput("cutadapt_adapter2", "R2 adapter", choices = r2_choices, selected = selected_choice(input$cutadapt_adapter2, r2_choices, r2_choices[[1]]), selectize = FALSE),
+          textInput("cutadapt_min_length", "Minimum read length", value = input$cutadapt_min_length %||% "20")
+        ), "run_cutadapt", "Submit cutadapt"),
+        tool_panel("FastQC", status, "Quality reports for selected raw or trimmed ChIP-seq reads.", tagList(
+          uiOutput("chip_fastqc_samples_ui"),
+          checkboxInput("fastqc_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$fastqc_use_trimmed)))
+        ), "run_fastqc", "Submit FastQC"),
+        tool_panel("Bowtie2", status, "Align selected ChIP and input libraries, remove duplicates, and generate CPM bigWigs.", tagList(
+          uiOutput("chip_bowtie2_samples_ui"),
+          checkboxInput("chip_bowtie2_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$chip_bowtie2_use_trimmed))),
+          tags$p(class = "muted small-note", "Run target and matched input libraries before MACS2. Temporary files remain in project storage, not shared compute-node /tmp.")
+        ), "run_chip_bowtie2", "Submit Bowtie2"),
+        tool_panel("MACS2 Peaks", status, "Call ChIP-seq peaks against each target's explicit matched input control.", tagList(
+          uiOutput("chip_macs2_samples_ui"),
+          textInput("chip_macs2_qvalue", "MACS2 q-value", value = input$chip_macs2_qvalue %||% "0.01"),
+          selectInput("chip_macs2_peak_type", "Peak type", choices = c("Narrow peaks" = "narrow", "Broad peaks" = "broad"), selected = selected_choice(input$chip_macs2_peak_type, c("narrow", "broad"), "narrow"), selectize = FALSE),
+          tags$p(class = "muted small-note", "Only reference=chip rows are listed. Every target must name a reference=input row in control_sample; ambiguous controls are never guessed.")
+        ), "run_chip_macs2", "Submit MACS2"),
         div(class = "tool-card",
-          tags$h4("ChIP-seq pipeline setup"),
-          tags$p("The ChIP-seq project is isolated from RNA-seq tools while its dedicated Bowtie2, MACS2, and differential-binding submitters are being modernized."),
-          tags$p(class = "muted small-note", "No job will be submitted from this panel yet. You can edit and save the design matrix in Project Setup or Results Explorer without exposing STAR, featureCounts, or DESeq2 controls.")
+          tags$h4("Differential Peaks"),
+          tags$p("ChIP-specific differential binding is the next pipeline increment."),
+          tags$p(class = "muted small-note", "Existing peak and alignment results are already available in Results Explorer. DiffBind submission remains disabled until target/input-aware sample-sheet generation is validated.")
         )
       ))
     }
@@ -8416,10 +8590,10 @@ server <- function(input, output, session) {
     project_level_step_summary_ui(current_project(), job_history_state(), "GSEA")
   })
 
-  atac_sample_selector <- function(input_id, label) {
+  assay_sample_selector <- function(input_id, label, targets_only = FALSE) {
     p <- current_project()
-    if (!is_atac_project(p)) return(NULL)
-    design <- project_design_df(p)
+    if (!is_atac_project(p) && !is_chip_project(p)) return(NULL)
+    design <- if (is_chip_project(p) && isTRUE(targets_only)) chip_target_design(p) else project_design_df(p)
     samples <- if (NROW(design) && "sample" %in% names(design)) unique(trimws(as.character(design$sample))) else character(0)
     samples <- samples[nzchar(samples)]
     if (!length(samples)) return(div(class = "empty-box", "No included samples were found in the saved design matrix."))
@@ -8429,15 +8603,19 @@ server <- function(input, output, session) {
       options = list(plugins = list("remove_button"), placeholder = "Select samples"))
   }
 
-  output$atac_cutadapt_samples_ui <- renderUI(atac_sample_selector("atac_cutadapt_samples", "Samples to trim"))
-  output$atac_fastqc_samples_ui <- renderUI(atac_sample_selector("atac_fastqc_samples", "Samples for QC"))
-  output$atac_bowtie2_samples_ui <- renderUI(atac_sample_selector("atac_bowtie2_samples", "Samples to align"))
-  output$atac_macs2_samples_ui <- renderUI(atac_sample_selector("atac_macs2_samples", "Samples for peak calling"))
+  output$atac_cutadapt_samples_ui <- renderUI(assay_sample_selector("atac_cutadapt_samples", "Samples to trim"))
+  output$atac_fastqc_samples_ui <- renderUI(assay_sample_selector("atac_fastqc_samples", "Samples for QC"))
+  output$atac_bowtie2_samples_ui <- renderUI(assay_sample_selector("atac_bowtie2_samples", "Samples to align"))
+  output$atac_macs2_samples_ui <- renderUI(assay_sample_selector("atac_macs2_samples", "Samples for peak calling"))
+  output$chip_cutadapt_samples_ui <- renderUI(assay_sample_selector("chip_cutadapt_samples", "Samples to trim"))
+  output$chip_fastqc_samples_ui <- renderUI(assay_sample_selector("chip_fastqc_samples", "Samples for QC"))
+  output$chip_bowtie2_samples_ui <- renderUI(assay_sample_selector("chip_bowtie2_samples", "ChIP and input samples to align"))
+  output$chip_macs2_samples_ui <- renderUI(assay_sample_selector("chip_macs2_samples", "ChIP targets for peak calling", targets_only = TRUE))
 
   observeEvent(input$run_fastqc, {
     trimmed <- isTRUE(input$fastqc_use_trimmed)
     p <- current_project()
-    samples <- if (is_atac_project(p)) input$atac_fastqc_samples %||% character(0) else NULL
+    samples <- if (is_atac_project(p)) input$atac_fastqc_samples %||% character(0) else if (is_chip_project(p)) input$chip_fastqc_samples %||% character(0) else NULL
     run_submission("FastQC", submit_fastqc_jobs(p, trimmed, samples), if (trimmed) "trimmed reads" else "raw reads", samples = samples)
   })
   observeEvent(input$run_cutadapt, {
@@ -8450,7 +8628,7 @@ server <- function(input, output, session) {
       finish_submit_refresh()
     } else {
       p <- current_project()
-      samples <- if (is_atac_project(p)) input$atac_cutadapt_samples %||% character(0) else NULL
+      samples <- if (is_atac_project(p)) input$atac_cutadapt_samples %||% character(0) else if (is_chip_project(p)) input$chip_cutadapt_samples %||% character(0) else NULL
       run_submission("Cutadapt", submit_cutadapt_jobs(p, adapter1, adapter2, input$cutadapt_min_length, samples), "raw reads", samples = samples)
       updateCheckboxInput(session, "fastqc_use_trimmed", value = TRUE)
       updateCheckboxInput(session, "star_use_trimmed", value = TRUE)
@@ -8514,6 +8692,27 @@ server <- function(input, output, session) {
   observeEvent(input$run_atac_macs2, {
     samples <- input$atac_macs2_samples %||% character(0)
     run_submission("MACS2 Peaks", submit_atac_macs2_jobs(current_project(), input$atac_macs2_qvalue %||% "0.05", samples), "shift -100; extsize 200", samples = samples)
+  })
+  observeEvent(input$run_chip_bowtie2, {
+    trimmed <- isTRUE(input$chip_bowtie2_use_trimmed)
+    samples <- input$chip_bowtie2_samples %||% character(0)
+    run_submission(
+      "Bowtie2",
+      submit_chip_bowtie2_jobs(current_project(), trimmed, samples),
+      paste(if (trimmed) "trimmed" else "raw", if (current_project()$paired_end) "paired-end" else "single-end", "ChIP-seq reads"),
+      samples = samples
+    )
+  })
+  observeEvent(input$run_chip_macs2, {
+    samples <- input$chip_macs2_samples %||% character(0)
+    qvalue <- input$chip_macs2_qvalue %||% "0.01"
+    peak_type <- input$chip_macs2_peak_type %||% "narrow"
+    run_submission(
+      "MACS2 Peaks",
+      submit_chip_macs2_jobs(current_project(), qvalue, peak_type, samples),
+      paste("matched input controls;", peak_type, paste0("q=", qvalue)),
+      samples = samples
+    )
   })
   observeEvent(input$run_atac_diffbind, {
     run_submission(
@@ -8841,7 +9040,7 @@ server <- function(input, output, session) {
     tagList(selectInput("atac_insert_size_file", "Sample insert-size plot", choices = stats::setNames(files, basename(dirname(files))), selected = selected_choice(input$atac_insert_size_file, files, files[[1]]), selectize = FALSE), image_or_file_ui(input$atac_insert_size_file %||% files[[1]], "650px"))
   })
   output$atac_peak_file_ui <- renderUI({
-    progress_refresh(); choices <- result_file_choices(current_project(), "macs2", "(narrowPeak|peaks_annotated\\.txt)$")
+    progress_refresh(); choices <- result_file_choices(current_project(), "macs2", "(narrowPeak|broadPeak|peaks_annotated\\.txt)$")
     if (!length(choices)) return(div(class = "empty-box", "No MACS2 peaks found yet."))
     selectInput("atac_peak_file", "Peak file", choices = choices, selected = selected_choice(input$atac_peak_file, choices, choices[[1]]), selectize = FALSE)
   })
