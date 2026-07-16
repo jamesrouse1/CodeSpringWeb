@@ -4560,9 +4560,20 @@ sample_submission_plan <- function(project, step, target_list) {
     sample_complete <- length(targets) > 0 && all(file.exists(targets)) && all(vapply(targets, file_size_for, numeric(1)) >= min_size)
     latest <- latest_job_for_sample(jobs, step, sample)
     latest_state <- if (NROW(latest) && "slurm_state" %in% names(latest)) latest$slurm_state[1] else ""
+    latest_time <- if (NROW(latest) && "time" %in% names(latest)) {
+      suppressWarnings(as.POSIXct(latest$time[1]))
+    } else {
+      as.POSIXct(NA)
+    }
+    target_mtimes <- if (sample_complete) file.info(targets)$mtime else as.POSIXct(character(0))
+    completion_is_current <- sample_complete && (
+      is.na(latest_time) ||
+        (length(target_mtimes) > 0 && all(!is.na(target_mtimes)) && all(target_mtimes >= latest_time))
+    )
     deleted_status <- latest_deleted_status(project, step, sample)
     should_retry <- latest_state %in% retry_states || grepl(", Deleted$", deleted_status)
     if (sample_active) active <- c(active, sample)
+    else if (completion_is_current) complete <- c(complete, sample)
     else if (should_retry) {
       retry <- c(retry, sample)
       submit <- c(submit, sample)
