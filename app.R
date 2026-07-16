@@ -5385,6 +5385,11 @@ submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "auto
   if (!length(plan$samples)) return(plan$message)
   design <- design[design$sample %in% plan$samples, , drop = FALSE]
   script <- file.path(SCRIPTS_DIR, "MACS2", "qsub_macs2_cutrun_PE.sh")
+  runner <- file.path(SCRIPTS_DIR, "MACS2", "macs2_cutrun_PE.sh")
+  missing_scripts <- c(script, runner)[!file.exists(c(script, runner))]
+  if (length(missing_scripts)) {
+    return(record_preflight_failure(project, "MACS2 (optional)", paste("Required CUT&RUN MACS scripts are missing:", paste(missing_scripts, collapse = ", ")), "macs2"))
+  }
   messages <- vapply(as.character(design$sample), function(sample) {
     sample_dir <- file.path(outdir, sample)
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
@@ -5394,7 +5399,7 @@ submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "auto
     target <- file.path(sample_dir, paste0(sample, "_macs2_complete.txt"))
     submit_sbatch(
       project, "MACS2 (optional)", script,
-      c(sample, cutrun_bowtie2_bam(project, sample), control_bam, res$macs2_genome, qvalue, sample_peak_type, sample_dir, project$name),
+      c(sample, cutrun_bowtie2_bam(project, sample), control_bam, res$macs2_genome, qvalue, sample_peak_type, sample_dir, project$name, runner),
       "macs2", paste(sample_peak_type, "q", qvalue), sample = sample, target = target, reference = res$macs2_genome
     )
   }, character(1))
