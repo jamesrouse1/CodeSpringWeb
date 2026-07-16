@@ -251,6 +251,8 @@ RNA_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq"), 
 RNA_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_atac"), winslash = "/", mustWork = FALSE)
 ATAC_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_atac"), winslash = "/", mustWork = FALSE)
+CHIP_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq_chip"), winslash = "/", mustWork = FALSE)
+CHIP_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest_chip"), winslash = "/", mustWork = FALSE)
 PROGRESS_REFRESH_MS <- 5000
 JOB_HISTORY_CACHE_SECONDS <- 10
 JOB_HISTORY_CACHE <- new.env(parent = emptyenv())
@@ -420,6 +422,10 @@ is_atac_project <- function(project) {
   identical(analysis_key(project$analysis_key %||% project$analysis), "atac")
 }
 
+is_chip_project <- function(project) {
+  identical(analysis_key(project$analysis_key %||% project$analysis), "chip")
+}
+
 parse_py_config <- function(path) {
   values <- list()
   if (!file.exists(path)) return(values)
@@ -569,6 +575,7 @@ example_dataset_paths <- function(key) {
     analysis_key(key),
     rna = list(name = "example_rnaseq", fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_dir = RNA_EXAMPLE_DESIGN_DIR),
     atac = list(name = "example_atac", fastq_dir = ATAC_EXAMPLE_FASTQ_DIR, design_dir = ATAC_EXAMPLE_DESIGN_DIR),
+    chip = list(name = "example_chip", fastq_dir = CHIP_EXAMPLE_FASTQ_DIR, design_dir = CHIP_EXAMPLE_DESIGN_DIR),
     NULL
   )
 }
@@ -576,7 +583,7 @@ example_dataset_paths <- function(key) {
 is_bundled_example_design <- function(path) {
   path <- normalizePath(path %||% "", winslash = "/", mustWork = FALSE)
   examples <- normalizePath(
-    c(file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(ATAC_EXAMPLE_DESIGN_DIR, "design_matrix.txt")),
+    c(file.path(RNA_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(ATAC_EXAMPLE_DESIGN_DIR, "design_matrix.txt"), file.path(CHIP_EXAMPLE_DESIGN_DIR, "design_matrix.txt")),
     winslash = "/", mustWork = FALSE
   )
   nzchar(path) && path %in% examples
@@ -749,6 +756,15 @@ write_project_config <- function(project) {
   )
   if (is_atac_project(project)) {
     ref <- atac_reference_resources(project)
+    lines <- c(lines,
+      sprintf("bowtie2_index = %s", deparse(ref$bowtie2_index)),
+      sprintf("chrom_sizes = %s", deparse(ref$chrom_sizes)),
+      sprintf("effective_genome_size = %s", deparse(ref$effective_genome_size)),
+      sprintf("macs2_genome_size = %s", deparse(ref$macs2_genome))
+    )
+  }
+  if (is_chip_project(project)) {
+    ref <- chip_reference_resources(project)
     lines <- c(lines,
       sprintf("bowtie2_index = %s", deparse(ref$bowtie2_index)),
       sprintf("chrom_sizes = %s", deparse(ref$chrom_sizes)),
@@ -1061,6 +1077,7 @@ default_metadata_cols <- function(project = NULL, analysis = NULL) {
   key <- if (!is.null(project)) analysis_key(project$analysis_key %||% project$analysis) else analysis_key(analysis %||% "rna")
   if (identical(key, "cutrun")) return(c("cell_type", "mark", "target_class", "seacr_stringency", "condition", "replicate", "control_sample"))
   if (identical(key, "atac")) return(c("cell_type", "condition", "replicate"))
+  if (identical(key, "chip")) return(c("treatment", "reference", "condition", "replicate", "control_sample"))
   "treatment"
 }
 
@@ -1078,7 +1095,7 @@ parse_metadata_cols <- function(x, project = NULL) {
   cols <- cols[nzchar(cols) & !cols %in% c("sample", "filename", "include", "status")]
   cols <- unique(cols)
   if (!length(cols)) cols <- default_metadata_cols(project)
-  if (!is.null(project) && is_cutrun_project(project)) cols <- unique(c(default_metadata_cols(project), cols))
+  if (!is.null(project) && (is_cutrun_project(project) || is_atac_project(project) || is_chip_project(project))) cols <- unique(c(default_metadata_cols(project), cols))
   cols
 }
 
@@ -1112,7 +1129,21 @@ design_matrix_ui <- function(df, project = NULL) {
       class = "muted small-note",
       "CUT&RUN target_class values: tf_or_other, histone_narrow, histone_broad, or control. seacr_stringency may be auto, stringent, or relaxed. Auto uses the SEACR panel default. Target class documents peak biology but does not silently change SEACR stringency."
     ),
+    if (!is.null(project) && is_chip_project(project)) tags$p(
+      class = "muted small-note",
+      "ChIP-seq reference should be chip for target libraries and input for matched input controls. Use control_sample to assign each target library explicitly to its input control."
+    ),
     table_output("design_editor_table")
+  )
+}
+
+results_design_matrix_ui <- function(description = "Edit the saved experimental design used by downstream analyses.") {
+  tagList(
+    div(class = "cutrun-section-heading", tags$h4("Experimental design"), tags$p(description)),
+    tags$p(class = "muted small-note", "Double-click a cell to edit it, then save. Changes are written to this project's private results manifest; bundled example files and source FASTQs are never modified."),
+    table_output("design_table"),
+    div(class = "button-row", actionButton("save_results_design", "Save design matrix", class = "btn-primary")),
+    verbatimTextOutput("results_design_save_status")
   )
 }
 
@@ -2406,9 +2437,10 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
   design <- project$design_matrix_path
   if (is.null(jobs)) jobs <- job_history(project)
   if (is.null(active_states)) active_states <- active_job_state_map_from_jobs(jobs)
-  if (is_atac_project(project)) {
+  if (is_atac_project(project) || is_chip_project(project)) {
+    project_order <- if (is_chip_project(project)) chip_pipeline_order() else atac_pipeline_order()
     raw <- data.frame(
-      step = atac_pipeline_order(),
+      step = project_order,
       status = c(
         if (file.exists(design)) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "cutadapt"), fastq_suffix_regex) > 0) "Complete" else "Not started",
@@ -2607,13 +2639,18 @@ atac_pipeline_order <- function() {
   c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks", "Differential Peaks")
 }
 
+chip_pipeline_order <- function() {
+  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks", "Differential Peaks")
+}
+
 all_pipeline_steps <- function() {
-  unique(c(rna_pipeline_order(), cutrun_pipeline_order(), atac_pipeline_order()))
+  unique(c(rna_pipeline_order(), cutrun_pipeline_order(), atac_pipeline_order(), chip_pipeline_order()))
 }
 
 pipeline_order <- function(project = NULL) {
   if (!is.null(project) && is_cutrun_project(project)) return(cutrun_pipeline_order())
   if (!is.null(project) && is_atac_project(project)) return(atac_pipeline_order())
+  if (!is.null(project) && is_chip_project(project)) return(chip_pipeline_order())
   rna_pipeline_order()
 }
 
@@ -3012,7 +3049,7 @@ atac_results_explorer_ui <- function() {
   div(class = "native-results-host cutrun-results-host", div(class = "app-shell cutrun-results-shell",
     div(class = "hero cutrun-results-hero", div(class = "hero-copy", h1(class = "hero-title", "ATAC-seq Results Explorer"), div(class = "hero-kicker", "GRCm39/GENCODE M39 accessibility analysis"))),
     div(class = "main-tabs", tabsetPanel(id = "atac_results_tabs",
-      tabPanel("Overview", br(), actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"), tags$h4("Pipeline status"), table_output("results_overview"), tags$h4("Design matrix"), table_output("design_table")),
+      tabPanel("Overview", br(), actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"), tags$h4("Pipeline status"), table_output("results_overview"), results_design_matrix_ui("Samples, conditions, cell types, and replicates used by ATAC-seq peak and differential-accessibility analyses.")),
       tabPanel("QC", br(), tabsetPanel(id = "atac_qc_tabs",
         tabPanel("Initial QC", br(), sidebarLayout(
           sidebarPanel(width = 2, uiOutput("atac_qc_sample_control"), uiOutput("atac_qc_mode_control"), tags$hr(), helpText("FastQC and FastQ Screen reports for raw or cutadapt-trimmed reads.")),
@@ -3034,6 +3071,43 @@ atac_results_explorer_ui <- function() {
         ))
       )),
       tabPanel("Differential Accessibility", br(), sidebarLayout(
+        sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
+        mainPanel(width = 10, tabsetPanel(
+          tabPanel("Results", br(), table_output("atac_diffbind_table")),
+          tabPanel("PCA", br(), uiOutput("atac_diffbind_pca_ui")),
+          tabPanel("Volcano", br(), uiOutput("atac_diffbind_volcano_ui"))
+        ))
+      )),
+      tabPanel("Files", br(), uiOutput("atac_file_ui"), uiOutput("atac_file_view"))
+    ))
+  ))
+}
+
+chip_results_explorer_ui <- function() {
+  div(class = "native-results-host cutrun-results-host", div(class = "app-shell cutrun-results-shell",
+    div(class = "hero cutrun-results-hero", div(class = "hero-copy",
+      h1(class = "hero-title", "ChIP-seq Results Explorer"),
+      div(class = "hero-kicker", "Alignment, peak calling, and differential binding results")
+    )),
+    div(class = "main-tabs", tabsetPanel(id = "chip_results_tabs",
+      tabPanel("Overview", br(),
+        actionButton("refresh_atac_results", "Refresh results", class = "btn-primary"),
+        tags$h4("Pipeline status"),
+        table_output("results_overview"),
+        results_design_matrix_ui("Samples, targets, conditions, replicates, and matched input controls used by ChIP-seq analyses.")
+      ),
+      tabPanel("QC", br(),
+        tags$h4("Alignment summary across samples"),
+        table_output("atac_alignment_summary"),
+        tags$hr(),
+        tags$h4("Post-alignment output checks"),
+        table_output("atac_postprocess_status")
+      ),
+      tabPanel("Peaks", br(), sidebarLayout(
+        sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ChIP-seq peak calls.")),
+        mainPanel(width = 10, table_output("atac_peak_table"))
+      )),
+      tabPanel("Differential Binding", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
         mainPanel(width = 10, tabsetPanel(
           tabPanel("Results", br(), table_output("atac_diffbind_table")),
@@ -3176,8 +3250,7 @@ cutrun_results_explorer_ui <- function() {
             div(class = "cutrun-section-heading", tags$h4("Pipeline status"), tags$p("Completion state for every CUT&RUN analysis stage.")),
             table_output("results_overview"),
             br(),
-            div(class = "cutrun-section-heading", tags$h4("Experimental design"), tags$p("Samples, marks, conditions, replicates, and matched controls used by the analysis.")),
-            table_output("design_table")
+            results_design_matrix_ui("Samples, marks, conditions, replicates, and matched controls used by the analysis.")
           ),
           tabPanel("QC",
             br(),
@@ -3696,7 +3769,7 @@ sample_level_pipeline_steps <- function() {
 
 sample_level_steps_for_project <- function(project) {
   if (is_cutrun_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "SEACR", "MACS2 (optional)")
-  else if (is_atac_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks")
+  else if (is_atac_project(project) || is_chip_project(project)) c("Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks")
   else c("Cutadapt", "FastQC", "STAR", "featureCounts", "RSEM (optional)", "Kallisto (optional)")
 }
 
@@ -4008,7 +4081,7 @@ genome_species <- function(project) {
 genome_reference_key <- function(project) {
   catalog <- genome_reference_catalog()
   species <- genome_species(project)
-  if (is_atac_project(project) || is_cutrun_project(project)) {
+  if (is_atac_project(project) || is_cutrun_project(project) || is_chip_project(project)) {
     return(if (identical(species, "human")) "human_gencode50" else "mouse_gencodeM39")
   }
   genome <- tolower(project$genome %||% "")
@@ -4072,8 +4145,12 @@ atac_reference_resources <- function(project) {
   }
 }
 
+chip_reference_resources <- function(project) {
+  atac_reference_resources(project)
+}
+
 project_reference_label <- function(project) {
-  if (is_cutrun_project(project)) cutrun_reference_resources(project)$label else if (is_atac_project(project)) atac_reference_resources(project)$label else gencode_label(project)
+  if (is_cutrun_project(project)) cutrun_reference_resources(project)$label else if (is_atac_project(project)) atac_reference_resources(project)$label else if (is_chip_project(project)) chip_reference_resources(project)$label else gencode_label(project)
 }
 
 adapter_choices_r1 <- function() {
@@ -7456,7 +7533,7 @@ server <- function(input, output, session) {
     example <- example_dataset_paths(key)
     if (is.null(example)) return()
     current_name <- trimws(input$new_project_name %||% "")
-    if (!nzchar(current_name) || grepl("^example_(rnaseq|atac)$", current_name)) {
+    if (!nzchar(current_name) || grepl("^example_(rnaseq|atac|chip)$", current_name)) {
       updateTextInput(session, "new_project_name", value = example$name)
     }
     new_fastq_folders(character(0))
@@ -7464,7 +7541,7 @@ server <- function(input, output, session) {
     updateTextInput(session, "new_fastq_dir", value = example$fastq_dir)
     updateTextInput(session, "new_design_matrix_path", value = example$design_dir)
     updateSelectInput(session, "new_species", selected = "mouse")
-    updateRadioButtons(session, "new_paired_end", selected = "paired")
+    updateRadioButtons(session, "new_paired_end", selected = if (identical(key, "chip")) "single" else "paired")
     output$create_project_status <- renderText(paste("Loaded the bundled", analysis_label(key), "example paths. Choose a project name and click Create project."))
   })
 
@@ -7695,8 +7772,8 @@ server <- function(input, output, session) {
 
   observeEvent(input$scan_fastqs, {
     p <- current_project()
-    is_cutrun <- is_cutrun_project(p); is_atac <- is_atac_project(p)
-    scanned <- scan_fastq_dirs(project_fastq_dirs(p), p$paired_end, metadata_cols_from_input(), infer_samples = is_cutrun || is_atac)
+    is_cutrun <- is_cutrun_project(p); is_atac <- is_atac_project(p); is_chip <- is_chip_project(p)
+    scanned <- scan_fastq_dirs(project_fastq_dirs(p), p$paired_end, metadata_cols_from_input(), infer_samples = is_cutrun || is_atac || is_chip)
     if (is_cutrun) scanned <- infer_cutrun_metadata(scanned)
     if (is_atac) scanned <- infer_atac_metadata(scanned)
     design_state(scanned)
@@ -7770,8 +7847,7 @@ server <- function(input, output, session) {
     }, striped = TRUE, bordered = TRUE, spacing = "s")
   }
 
-  observeEvent(input$design_editor_table_cell_edit, {
-    info <- input$design_editor_table_cell_edit
+  apply_design_cell_edit <- function(info) {
     df <- design_state()
     if (!NROW(df) || is.null(info$row) || is.null(info$col)) return()
     cols <- design_matrix_columns(df)
@@ -7787,7 +7863,42 @@ server <- function(input, output, session) {
       df[[col_name]][row] <- value
     }
     design_state(df)
+  }
+
+  observeEvent(input$design_editor_table_cell_edit, {
+    apply_design_cell_edit(input$design_editor_table_cell_edit)
   }, ignoreInit = TRUE)
+
+  observeEvent(input$design_table_cell_edit, {
+    apply_design_cell_edit(input$design_table_cell_edit)
+  }, ignoreInit = TRUE)
+
+  save_design_state <- function(p, is_new = FALSE) {
+    df <- design_state()
+    metadata <- unique(c(
+      metadata_cols_from_input(),
+      project_metadata_cols(p),
+      setdiff(names(df), c("include", "sample", "filename", "status"))
+    ))
+    original_design_path <- p$design_matrix_path %||% ""
+    design_path <- write_design_matrix(p, df, metadata)
+    p$design_matrix_path <- design_path
+    cfg <- write_project_config(p)
+    refreshed <- discover_projects()
+    projects(refreshed)
+    write_last_project_id(p$id)
+    updateSelectInput(session, "project_id", choices = project_select_choices(refreshed, p$analysis), selected = p$id)
+    design_state(design_editor_from_project(p, metadata))
+    safe_refresh_progress_now("design matrix saved")
+    note <- if (nzchar(original_design_path) && normalizePath(original_design_path, winslash = "/", mustWork = FALSE) != normalizePath(design_path, winslash = "/", mustWork = FALSE)) {
+      paste0("\nOriginal design matrix was not modified: ", original_design_path)
+    } else ""
+    if (isTRUE(is_new)) {
+      paste("Saved edited design matrix copy:", design_path, "\nCreated project:", p$name, "\nSaved project file:", cfg, note)
+    } else {
+      paste("Saved edited design matrix copy:", design_path, "\nUpdated project file:", cfg, note)
+    }
+  }
 
   output$design_save_status <- renderText("")
   observeEvent(input$save_design, {
@@ -7796,30 +7907,17 @@ server <- function(input, output, session) {
       output$design_save_status <- renderText("ERROR: Enter a project name before saving a new project design matrix.")
       return()
     }
-    df <- design_state()
-    design_state(df)
-    metadata <- metadata_cols_from_input()
     msg <- tryCatch({
-      original_design_path <- p$design_matrix_path %||% ""
-      design_path <- write_design_matrix(p, df, metadata)
-      p$design_matrix_path <- design_path
-      cfg <- write_project_config(p)
-      refreshed <- discover_projects()
-      projects(refreshed)
-      write_last_project_id(p$id)
-      updateSelectInput(session, "project_id", choices = project_select_choices(refreshed, p$analysis), selected = p$id)
-      note <- if (nzchar(original_design_path) && normalizePath(original_design_path, winslash = "/", mustWork = FALSE) != normalizePath(design_path, winslash = "/", mustWork = FALSE)) {
-        paste0("\nOriginal design matrix was not modified: ", original_design_path)
-      } else {
-        ""
-      }
-      if (identical(input$project_id, "__new__")) {
-        paste("Saved edited design matrix copy:", design_path, "\nCreated project:", p$name, "\nSaved project file:", cfg, note)
-      } else {
-        paste("Saved edited design matrix copy:", design_path, "\nUpdated project file:", cfg, note)
-      }
+      save_design_state(p, identical(input$project_id, "__new__"))
     }, error = function(e) paste("ERROR:", conditionMessage(e)))
     output$design_save_status <- renderText(msg)
+  })
+
+  output$results_design_save_status <- renderText("")
+  observeEvent(input$save_results_design, {
+    p <- current_project()
+    msg <- tryCatch(save_design_state(p, FALSE), error = function(e) paste("ERROR:", conditionMessage(e)))
+    output$results_design_save_status <- renderText(msg)
   })
 
   observe({
@@ -7886,13 +7984,13 @@ server <- function(input, output, session) {
         )
       ))
     }
-    ref <- if (is_cutrun_project(p)) cutrun_reference_resources(p) else if (is_atac_project(p)) atac_reference_resources(p) else genome_resources(p)
+    ref <- if (is_cutrun_project(p)) cutrun_reference_resources(p) else if (is_atac_project(p)) atac_reference_resources(p) else if (is_chip_project(p)) chip_reference_resources(p) else genome_resources(p)
     div(class = "resource-strip",
         div(class = "resource-card",
             tags$strong("Genome resources"),
             tags$p(class = "muted status-path", project_reference_label(p)),
-            tags$p(class = "status-path", if (is_cutrun_project(p) || is_atac_project(p)) ref$bowtie2_index else ref$gtf),
-            if (is_cutrun_project(p) || is_atac_project(p)) tags$p(class = "status-path", ref$chrom_sizes) else NULL
+            tags$p(class = "status-path", if (is_cutrun_project(p) || is_atac_project(p) || is_chip_project(p)) ref$bowtie2_index else ref$gtf),
+            if (is_cutrun_project(p) || is_atac_project(p) || is_chip_project(p)) tags$p(class = "status-path", ref$chrom_sizes) else NULL
         ),
         div(class = "resource-card flowchart-card",
             if (file.exists(FLOWCHART_PATH)) tags$img(src = file.path("codespring_flowchart", basename(FLOWCHART_PATH))) else tags$p("Pipeline flowchart")
@@ -7909,6 +8007,15 @@ server <- function(input, output, session) {
     status <- status[order(step_order(status$step)), , drop = FALSE]
     r1_choices <- adapter_choices_r1()
     r2_choices <- adapter_choices_r2()
+    if (is_chip_project(p)) {
+      return(div(class = "run-grid",
+        div(class = "tool-card",
+          tags$h4("ChIP-seq pipeline setup"),
+          tags$p("The ChIP-seq project is isolated from RNA-seq tools while its dedicated Bowtie2, MACS2, and differential-binding submitters are being modernized."),
+          tags$p(class = "muted small-note", "No job will be submitted from this panel yet. You can edit and save the design matrix in Project Setup or Results Explorer without exposing STAR, featureCounts, or DESeq2 controls.")
+        )
+      ))
+    }
     if (is_cutrun_project(p)) {
       normalization_choice <- isolate(cutrun_normalization_choice())
       return(div(class = "run-grid",
@@ -8512,7 +8619,7 @@ server <- function(input, output, session) {
 
   native_results_app <- reactive({
     native_results_refresh()
-    if (is_cutrun_project(current_project()) || is_atac_project(current_project())) return(NULL)
+    if (is_cutrun_project(current_project()) || is_atac_project(current_project()) || is_chip_project(current_project())) return(NULL)
     load_native_rnaseq_viewer(current_project())
   })
 
@@ -8546,6 +8653,7 @@ server <- function(input, output, session) {
       return(cutrun_results_explorer_ui())
     }
     if (is_atac_project(current_project())) return(atac_results_explorer_ui())
+    if (is_chip_project(current_project())) return(chip_results_explorer_ui())
     err <- native_results_error()
     if (nzchar(err)) {
       return(div(class = "empty-box", tags$h4("Results Explorer server error"), tags$pre(err)))
@@ -8580,7 +8688,11 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
-  output$design_table <- render_csl_table(safe_read_table(current_project()$design_matrix_path), page_length = 50)
+  output$design_table <- render_csl_table({
+    df <- design_state()
+    if (!NROW(df)) return(data.frame())
+    df[, design_matrix_columns(df), drop = FALSE]
+  }, page_length = 50, editable = TRUE)
   output$atac_qc_sample_control <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
