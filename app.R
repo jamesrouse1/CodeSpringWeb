@@ -145,16 +145,17 @@ find_codespringlab_root <- function() {
     getwd(),
     dirname(getwd()),
     path.expand("~/CodeSpringLab"),
-    path.expand("~/CSH/CodeSpringLab"),
-    "/grid/bsr/home/rouse/CodeSpringLab",
-    "/Users/rouse/CSH/CodeSpringLab"
+    path.expand("~/CSH/CodeSpringLab")
   ))
   for (candidate in candidates[nzchar(candidates)]) {
     if (dir.exists(file.path(candidate, "scripts_DoNotTouch"))) {
       return(normalizePath(candidate, winslash = "/", mustWork = FALSE))
     }
   }
-  normalizePath(getwd(), winslash = "/", mustWork = FALSE)
+  stop(
+    "CodeSpringLab was not found for the current user. Install it at ~/CodeSpringLab ",
+    "or launch CodeSpringApp with CSL_CODESPRINGLAB_ROOT=/path/to/CodeSpringLab."
+  )
 }
 
 CSL_ROOT <- find_codespringlab_root()
@@ -163,6 +164,10 @@ APP_HOME <- path.expand(Sys.getenv("CSL_WEB_HOME", unset = "~/.codespringweb"))
 dir.create(APP_HOME, recursive = TRUE, showWarnings = FALSE)
 JOBS_PATH <- file.path(APP_HOME, "jobs.tsv")
 LAST_PROJECT_PATH <- file.path(APP_HOME, "last_project_id.txt")
+PROJECT_CONFIG_ROOT <- file.path(APP_HOME, "project_configs")
+DEFAULT_RESULTS_ROOT <- normalizePath(file.path(path.expand("~"), "csl_results"), winslash = "/", mustWork = FALSE)
+RNA_EXAMPLE_FASTQ_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "fastq"), winslash = "/", mustWork = FALSE)
+RNA_EXAMPLE_DESIGN_DIR <- normalizePath(file.path(SCRIPTS_DIR, "test", "manifest"), winslash = "/", mustWork = FALSE)
 PROGRESS_REFRESH_MS <- 5000
 JOB_HISTORY_CACHE_SECONDS <- 10
 JOB_HISTORY_CACHE <- new.env(parent = emptyenv())
@@ -440,32 +445,17 @@ legacy_project_from_config <- function(path) {
 }
 
 discover_projects <- function() {
-  roots <- c(file.path(SCRIPTS_DIR, "project_configs"), file.path(CSL_ROOT, "project_configs"))
+  # Project configs are user state. Keeping discovery inside APP_HOME prevents
+  # configs accidentally committed to CodeSpringLab from appearing for every
+  # person who clones the repositories.
+  roots <- PROJECT_CONFIG_ROOT
   files <- character(0)
   for (root in roots) {
     if (dir.exists(root)) files <- c(files, list.files(root, pattern = "\\.py$", recursive = TRUE, full.names = TRUE))
   }
   files <- unique(normalizePath(files, winslash = "/", mustWork = FALSE))
   projects <- Filter(Negate(is.null), lapply(files, legacy_project_from_config))
-  if (!length(projects)) {
-    projects <- list(list(
-      id = "rna/example_dataset",
-      name = "example_dataset",
-      label = "example_dataset",
-      analysis = "RNA-seq",
-      analysis_key = "rna",
-      genome = "mouse",
-      genome_version = "mouse_gencodeM29",
-      paired_end = TRUE,
-      results_root = normalizePath(path.expand("~/csl_results"), winslash = "/", mustWork = FALSE),
-      data_dir = normalizePath(path.expand("~/csl_results/example_dataset/data"), winslash = "/", mustWork = FALSE),
-      fastq_dir = "",
-      fastq_dirs = character(0),
-      design_matrix_path = normalizePath(path.expand("~/csl_results/example_dataset/data/manifest/design_matrix.txt"), winslash = "/", mustWork = FALSE),
-      source_config = "",
-      source = "default"
-    ))
-  }
+  if (!length(projects)) return(list())
   names(projects) <- vapply(projects, `[[`, character(1), "id")
   projects
 }
@@ -474,7 +464,7 @@ new_project_from_inputs <- function(input) {
   key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
   project_name <- clean_name(input$new_project_name %||% paste0("new_", key, "_project"), paste0("new_", key, "_project"))
   label <- input$new_project_name %||% project_name
-  results_root <- normalizePath(path.expand(input$new_results_root %||% "~/csl_results"), winslash = "/", mustWork = FALSE)
+  results_root <- normalizePath(path.expand(input$new_results_root %||% DEFAULT_RESULTS_ROOT), winslash = "/", mustWork = FALSE)
   data_dir <- file.path(results_root, project_name, "data")
   design_path <- trimws(input$new_design_matrix_path %||% "")
   if (!nzchar(design_path)) design_path <- file.path(data_dir, "manifest", "design_matrix.txt")
@@ -508,11 +498,11 @@ new_project_from_inputs <- function(input) {
 }
 
 project_config_dir <- function(key) {
-  file.path(SCRIPTS_DIR, "project_configs", analysis_key(key))
+  file.path(PROJECT_CONFIG_ROOT, analysis_key(key))
 }
 
 project_config_roots <- function() {
-  unique(normalizePath(c(file.path(SCRIPTS_DIR, "project_configs"), file.path(CSL_ROOT, "project_configs")), winslash = "/", mustWork = FALSE))
+  normalizePath(PROJECT_CONFIG_ROOT, winslash = "/", mustWork = FALSE)
 }
 
 is_managed_project_config <- function(path) {
@@ -547,7 +537,7 @@ delete_projects <- function(projects_to_delete, delete_data = FALSE) {
 project_result_dir <- function(project) {
   data_dir <- normalizePath(project$data_dir %||% "", winslash = "/", mustWork = FALSE)
   if (nzchar(data_dir) && basename(data_dir) %in% c("data", "log", "shiny")) return(dirname(data_dir))
-  file.path(normalizePath(project$results_root %||% "~/csl_results", winslash = "/", mustWork = FALSE), project$name %||% project$label)
+  file.path(normalizePath(project$results_root %||% DEFAULT_RESULTS_ROOT, winslash = "/", mustWork = FALSE), project$name %||% project$label)
 }
 
 project_result_dir_is_safe <- function(project, path = project_result_dir(project)) {
@@ -560,7 +550,10 @@ project_result_dir_is_safe <- function(project, path = project_result_dir(projec
 }
 
 dir_has_contents <- function(path) {
-  dir.exists(path) && length(list.files(path, all.files = TRUE, no.. = TRUE)) > 0
+  if (!dir.exists(path)) return(FALSE)
+  entries <- list.files(path, all.files = TRUE, no.. = TRUE)
+  entries <- setdiff(entries, c(".DS_Store", "Thumbs.db", "desktop.ini", ".gitkeep"))
+  length(entries) > 0
 }
 
 prune_project_job_history <- function(project) {
@@ -2133,19 +2126,24 @@ first_scalar_string <- function(x, fallback = "") {
   x[[1]]
 }
 
-server_browser_choices <- function(path, mode = "dir") {
+server_browser_listing <- function(path, mode = "dir") {
   path <- path.expand(trimws(first_scalar_string(path, path.expand("~"))))
   if (!nzchar(path) || !dir.exists(path)) path <- path.expand("~")
   path <- normalizePath(path, winslash = "/", mustWork = FALSE)
-  dirs <- list.dirs(path, recursive = FALSE, full.names = TRUE)
-  dirs <- dirs[dir.exists(dirs)]
-  dirs <- dirs[!grepl("^\\.", basename(dirs))]
-  dirs <- dirs[basename(dirs) != "__pycache__"]
-  dirs <- sort(dirs)
-  files <- list.files(path, recursive = FALSE, full.names = TRUE, all.files = FALSE, no.. = TRUE)
-  files <- files[file.exists(files) & !dir.exists(files)]
-  files <- files[!grepl("^\\.", basename(files))]
-  files <- sort(files)
+  # Listing a directory requires both read and traverse permission.
+  if (file.access(path, mode = 5) != 0) {
+    return(list(path = path, status = "unreadable", choices = list()))
+  }
+  all_entries <- suppressWarnings(list.files(
+    path,
+    recursive = FALSE,
+    full.names = TRUE,
+    all.files = TRUE,
+    no.. = TRUE
+  ))
+  entries <- all_entries[!startsWith(basename(all_entries), ".")]
+  dirs <- sort(entries[dir.exists(entries)])
+  files <- sort(entries[!dir.exists(entries)])
   choices <- list()
   if (length(dirs)) {
     choices[["Folders"]] <- stats::setNames(dirs, paste0("📁 ", basename(dirs)))
@@ -2153,7 +2151,18 @@ server_browser_choices <- function(path, mode = "dir") {
   if (length(files)) {
     choices[["Files in this folder"]] <- stats::setNames(rep(path, length(files)), paste0("📄 ", basename(files)))
   }
-  choices
+  status <- if (length(choices)) {
+    "ok"
+  } else if (length(all_entries)) {
+    "hidden_only"
+  } else {
+    "empty"
+  }
+  list(path = path, status = status, choices = choices)
+}
+
+server_browser_choices <- function(path, mode = "dir") {
+  server_browser_listing(path, mode)$choices
 }
 
 browser_start_path <- function(value, mode = "dir") {
@@ -6794,12 +6803,29 @@ server <- function(input, output, session) {
   }
 
   output$browser_current_path_text <- renderText({
-    paste("Current folder:", normalizePath(path_browser$path, winslash = "/", mustWork = FALSE))
+    run_user <- Sys.getenv("USER", unset = Sys.info()[["user"]] %||% "unknown")
+    paste(
+      "Current folder:", normalizePath(path_browser$path, winslash = "/", mustWork = FALSE),
+      "\nApp server user:", run_user
+    )
   })
 
   output$browser_choices_ui <- renderUI({
-    choices <- server_browser_choices(path_browser$path, path_browser$mode)
-    if (!length(choices)) return(div(class = "empty-box", "No visible folders or files in this folder."))
+    listing <- server_browser_listing(path_browser$path, path_browser$mode)
+    choices <- listing$choices
+    if (identical(listing$status, "unreadable")) {
+      run_user <- Sys.getenv("USER", unset = Sys.info()[["user"]] %||% "unknown")
+      return(div(
+        class = "empty-box",
+        tags$strong("This folder is not readable by the app process."),
+        tags$br(),
+        "The app is running as ", code(run_user), ". Check folder permissions or launch CodeSpringApp from the intended Unix account."
+      ))
+    }
+    if (identical(listing$status, "hidden_only")) {
+      return(div(class = "empty-box", "This folder contains only hidden items. Hidden files and folders are not shown."))
+    }
+    if (!length(choices)) return(div(class = "empty-box", "This folder is empty."))
     label <- "Folder contents"
     flat_values <- unlist(choices, use.names = FALSE)
     selected <- first_scalar_string(flat_values, path_browser$path)
@@ -6909,6 +6935,9 @@ server <- function(input, output, session) {
 
   output$new_project_ui <- renderUI({
     if (!identical(input$project_id, "__new__")) return(NULL)
+    new_analysis_key <- analysis_key(input$new_project_analysis %||% input$analysis %||% "RNA-seq")
+    default_fastq_dir <- if (identical(new_analysis_key, "rna")) RNA_EXAMPLE_FASTQ_DIR else ""
+    default_design_dir <- if (identical(new_analysis_key, "rna")) RNA_EXAMPLE_DESIGN_DIR else ""
     tagList(
       tags$hr(),
       h4("New Project"),
@@ -6923,7 +6952,7 @@ server <- function(input, output, session) {
         selected = "one"
       ),
       conditionalPanel("input.new_fastq_location_mode == 'one'", div(class = "new-project-path-control",
-          textInput("new_fastq_dir", "Raw FASTQ folder", value = "", placeholder = "Choose with Browse or paste a server path"),
+          textInput("new_fastq_dir", "Raw FASTQ folder", value = default_fastq_dir, placeholder = "Choose with Browse or paste a server path"),
           actionButton("browse_new_fastq_dir", "Browse server", class = "btn-default"),
           tags$p(class = "muted", "This folder must contain the FASTQ files named in design_matrix.txt. If this path is wrong, jobs are not submitted and a pre-submit error is written in the Logs tab.")
       )),
@@ -6937,11 +6966,11 @@ server <- function(input, output, session) {
           tags$p(class = "muted", "Add each sequencing-run folder separately. The saved folders are scanned as one input pool. Source FASTQs are read-only inputs; Cutadapt, Bowtie2, and all later steps write only beneath the project results folder.")
       )),
       div(class = "new-project-path-control",
-          textInput("new_results_root", "Results root", value = "~/csl_results", placeholder = "Where CodeSpringApp should write project results"),
+          textInput("new_results_root", "Results root", value = DEFAULT_RESULTS_ROOT, placeholder = "Where CodeSpringApp should write project results"),
           actionButton("browse_new_results_root", "Browse server", class = "btn-default")
       ),
       div(class = "new-project-path-control",
-          textInput("new_design_matrix_path", "Design matrix folder", value = "", placeholder = "Optional; folder containing or receiving design_matrix.txt"),
+          textInput("new_design_matrix_path", "Design matrix folder", value = default_design_dir, placeholder = "Optional; folder containing or receiving design_matrix.txt"),
           actionButton("browse_new_design_matrix_path", "Browse server", class = "btn-default"),
           tags$p(class = "muted", "Leave this blank to create the design matrix in the Design Matrix tab after the project is created.")
       ),

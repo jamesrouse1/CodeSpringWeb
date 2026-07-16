@@ -15,6 +15,7 @@ git clone https://github.com/jamesrouse1/CodeSpringApp.git
 ```
 
 CodeSpringLab is mandatory for CodeSpringApp. The launcher expects to find it at `~/CodeSpringLab` unless you set `CSL_CODESPRINGLAB_ROOT` manually.
+CodeSpringApp does not fall back to a developer's or another user's home directory. If the companion repository cannot be found for the current user, startup stops with an explicit path error.
 
 ## Run On The Server
 
@@ -99,12 +100,15 @@ Browse project logs by tool, sample/run, and output/error type. Export project/r
 
 ## Project Discovery
 
-CodeSpringApp discovers existing CodeSpringLab project configs from:
+CodeSpringApp stores and discovers project configs separately for each user under:
 
 ```text
-<CodeSpringLab>/scripts_DoNotTouch/project_configs/<analysis>/*.py
-<CodeSpringLab>/project_configs/<analysis>/*.py
+~/.codespringweb/project_configs/<analysis>/*.py
 ```
+
+Project configs inside the cloned CodeSpringLab or CodeSpringApp repositories are not displayed. This prevents example, test, or another user's projects from being distributed with the application.
+
+For a new RNA-seq project, the initial FASTQ and design-matrix fields point to CodeSpringLab's bundled example files under `scripts_DoNotTouch/test/fastq` and `scripts_DoNotTouch/test/manifest`. Replace either path when creating a real project. Other analysis types do not receive these RNA-seq defaults.
 
 For new projects, it creates project-local outputs under:
 

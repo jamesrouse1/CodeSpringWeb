@@ -191,7 +191,8 @@ if [[ -z "$APP_PID" ]] || ! kill -0 "$APP_PID" 2>/dev/null; then
   exit 1
 fi
 
-USER_NAME="${USER:-rouse}"
+USER_NAME="$(current_user)"
+USER_NAME="${USER_NAME:-${USER:-}}"
 printf '\n\033[32mCodeSpringApp is running on bamdev1 port %s.\033[0m\n' "$PORT"
 printf '\033[1;36mCopy/paste this command into your laptop terminal:\033[0m\n'
 printf '\033[1mssh -N -L %s:localhost:%s %s@bamdev1\033[0m\n' "$PORT" "$PORT" "$USER_NAME"
