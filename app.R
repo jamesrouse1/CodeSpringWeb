@@ -1466,6 +1466,16 @@ latest_deleted_status_from_records <- function(rec, step, sample = "") {
   tail(as.character(rec$deleted_status), 1)
 }
 
+latest_deleted_record_from_records <- function(rec, step, sample = "") {
+  if (!NROW(rec) || !"step" %in% names(rec)) return(data.frame())
+  rec <- rec[canonical_job_step(rec$step) == canonical_job_step(step), , drop = FALSE]
+  if (nzchar(sample %||% "") && "sample" %in% names(rec)) {
+    sample_rec <- rec[nzchar(rec$sample) & rec$sample == sample, , drop = FALSE]
+    if (NROW(sample_rec)) rec <- sample_rec
+  }
+  if (NROW(rec)) tail(rec, 1) else data.frame()
+}
+
 latest_deleted_status <- function(project, step, sample = "") {
   latest_deleted_status_from_records(deleted_step_records(project), step, sample)
 }
@@ -3242,7 +3252,8 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
   trimmed_pairs <- if ("FastQC" %in% sample_steps) sample_fastq_pairs(project, TRUE) else NULL
   active_job_states <- c("PENDING", "CONFIGURING", "COMPLETING", "RUNNING", "SUSPENDED", "Submitted")
   completed_job_states <- c("COMPLETED", "COMPLETED+", "CD")
-  cancelled_job_states <- c("CANCELLED", "CANCELLED+", "CA", "TIMEOUT", "FAILED", "NODE_FAIL", "PREEMPTED")
+  cancelled_job_states <- c("CANCELLED", "CANCELLED+", "CA")
+  failed_job_states <- c("TIMEOUT", "FAILED", "NODE_FAIL", "PREEMPTED", "OUT_OF_MEMORY", "BOOT_FAIL")
   active_jobs <- if (NROW(jobs) && "slurm_state" %in% names(jobs)) jobs[jobs$slurm_state %in% active_job_states, , drop = FALSE] else data.frame()
   rows <- list()
   cache_rows <- list()
@@ -3281,7 +3292,13 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       elapsed <- if (NROW(latest_hit) && "elapsed" %in% names(latest_hit)) latest_hit$elapsed[1] else ""
       min_size <- minimum_expected_bytes(step)
       complete_outputs <- length(sizes) > 0 && all(sizes >= min_size)
-      deleted_status <- latest_deleted_status_from_records(deleted_records, step, sample)
+      deleted_record <- latest_deleted_record_from_records(deleted_records, step, sample)
+      deleted_status <- if (NROW(deleted_record) && "deleted_status" %in% names(deleted_record)) as.character(deleted_record$deleted_status[1]) else ""
+      if (nzchar(deleted_status) && NROW(latest_hit) && "time" %in% names(latest_hit) && "time" %in% names(deleted_record)) {
+        latest_job_time <- suppressWarnings(as.POSIXct(latest_hit$time[1], tz = "UTC"))
+        deleted_time <- suppressWarnings(as.POSIXct(deleted_record$time[1], tz = "UTC"))
+        if (!is.na(latest_job_time) && !is.na(deleted_time) && latest_job_time > deleted_time) deleted_status <- ""
+      }
       deleted_outputs <- nzchar(deleted_status) && size == 0 && !active
       error_signal <- job_error_signal(jobs, step, sample)
       growing <- active && has_previous && size > previous_size
@@ -3290,10 +3307,13 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       slurm_waiting <- active && slurm_state %in% c("PENDING", "CONFIGURING", "Submitted")
       slurm_complete <- slurm_state %in% completed_job_states
       slurm_cancelled <- slurm_state %in% cancelled_job_states
+      slurm_failed <- slurm_state %in% failed_job_states
       status <- if (deleted_outputs) {
         deleted_status
       } else if (slurm_cancelled) {
         "Cancelled"
+      } else if (slurm_failed) {
+        "Likely failed"
       } else if (slurm_running) {
         "Running"
       } else if (slurm_waiting) {
@@ -3322,7 +3342,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       } else if (grepl(", Deleted$", status)) {
         "Data outputs for this step were deleted after the recorded status."
       } else if (identical(status, "Cancelled")) {
-        "SLURM reports this job was cancelled or failed."
+        "SLURM reports this job was cancelled."
       } else if (identical(status, "Running") && growing) {
         "Output file size increased since the last refresh."
       } else if (identical(status, "Running") && size == 0) {
