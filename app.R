@@ -4603,6 +4603,38 @@ cutrun_bowtie2_fragments <- function(project, sample) {
   file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_fragments.bed"))
 }
 
+cutrun_postprocess_status_table <- function(project) {
+  design <- cutrun_design(project)
+  if (!NROW(design) || !"sample" %in% names(design)) return(data.frame())
+  rows <- lapply(as.character(design$sample), function(sample) {
+    prefix <- file.path(project$data_dir, "bowtie2", sample, sample)
+    aligned_bam <- paste0(prefix, "Aligned.sortedByCoord.out.bam")
+    dedup_bam <- paste0(prefix, "Aligned.sortedByCoord_removeDup.out.bam")
+    fragments <- paste0(prefix, "_fragments.bed")
+    summary <- paste0(prefix, "_alignment_summary.txt")
+    sample_pattern <- gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", sample, perl = TRUE)
+    signal_bedgraphs <- list.files(dirname(prefix), pattern = paste0("^", sample_pattern, "_fragments\\.(raw|CPM|spikein)\\.bedgraph$"), full.names = TRUE)
+    signal_bigwigs <- list.files(dirname(prefix), pattern = paste0("^", sample_pattern, "_fragments\\.(raw|CPM|spikein)\\.bw$"), full.names = TRUE)
+    bedgraph_ok <- length(signal_bedgraphs) > 0 && any(vapply(signal_bedgraphs, file_size_for, numeric(1)) > 0)
+    bigwig_ok <- length(signal_bigwigs) > 0 && any(vapply(signal_bigwigs, file_size_for, numeric(1)) > 0)
+    repairable <- file_size_for(aligned_bam) > 0 && file_size_for(dedup_bam) > 0
+    complete <- file_size_for(fragments) > 0 && bedgraph_ok && bigwig_ok && file_size_for(summary) >= minimum_expected_bytes("Bowtie2")
+    issues <- c(
+      if (file_size_for(fragments) <= 0) "fragments BED",
+      if (!bedgraph_ok) "signal bedGraph",
+      if (!bigwig_ok) "signal bigWig",
+      if (file_size_for(summary) < minimum_expected_bytes("Bowtie2")) "alignment summary"
+    )
+    data.frame(
+      sample = sample,
+      status = if (complete) "Complete" else if (repairable) "Repair available" else "Full Bowtie2 required",
+      issues = if (length(issues)) paste(issues, collapse = ", ") else "None",
+      stringsAsFactors = FALSE
+    )
+  })
+  do.call(rbind, rows)
+}
+
 cutrun_missing_bowtie2_message <- function(project, step = "this step") {
   active_msg <- active_upstream_message(project, "Bowtie2", step)
   if (nzchar(active_msg)) return(active_msg)
@@ -4818,6 +4850,57 @@ submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_f
     )
   })
   paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+submit_cutrun_postprocess_jobs <- function(project, samples, trimmed = TRUE, mapq = 30, max_fragment = 1000,
+                                           dedup_target = FALSE, dedup_control = TRUE, remove_mito = TRUE,
+                                           normalization_mode = "spikein", spikein_index_path = CUTRUN_DEFAULT_SPIKEIN_INDEX,
+                                           spikein_name = CUTRUN_DEFAULT_SPIKEIN_NAME, spikein_min_reads = "1000") {
+  if (!isTRUE(project$paired_end)) return(record_preflight_failure(project, "Bowtie2", "Selective CUT&RUN post-alignment repair currently requires paired-end data.", "bowtie2_postprocess"))
+  samples <- unique(trimws(as.character(samples %||% character(0))))
+  samples <- samples[nzchar(samples)]
+  if (!length(samples)) return(record_preflight_failure(project, "Bowtie2", "Select at least one repairable CUT&RUN sample.", "bowtie2_postprocess"))
+  status <- cutrun_postprocess_status_table(project)
+  eligible <- if (NROW(status)) as.character(status$sample[status$status == "Repair available"]) else character(0)
+  invalid <- setdiff(samples, eligible)
+  if (length(invalid)) return(record_preflight_failure(project, "Bowtie2", paste("These samples require full Bowtie2 or are already complete:", paste(invalid, collapse = ", ")), "bowtie2_postprocess"))
+
+  pairs <- sample_fastq_pairs(project, trimmed)
+  msg <- missing_read_message(project, pairs, trimmed)
+  if (nzchar(msg)) return(record_preflight_failure(project, "Bowtie2", msg, "bowtie2_postprocess"))
+  pairs <- pairs[pairs$sample %in% samples, , drop = FALSE]
+  missing_samples <- setdiff(samples, as.character(pairs$sample))
+  if (length(missing_samples)) return(record_preflight_failure(project, "Bowtie2", paste("FASTQ entries were not found for:", paste(missing_samples, collapse = ", ")), "bowtie2_postprocess"))
+
+  res <- cutrun_reference_resources(project)
+  script <- file.path(SCRIPTS_DIR, "bowtie2", "qsub_bowtie2_cutrun_PE.sh")
+  runner <- file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_cutrun_PE.sh")
+  missing_resources <- c(script, runner, res$chrom_sizes)[!file.exists(c(script, runner, res$chrom_sizes))]
+  if (length(missing_resources)) return(record_preflight_failure(project, "Bowtie2", paste("CUT&RUN repair resources are missing:", paste(missing_resources, collapse = ", ")), "bowtie2_postprocess"))
+
+  normalization_mode <- selected_choice(normalization_mode, c("CPM", "spikein", "none"), "spikein")
+  spikein_index_path <- trimws(as.character(spikein_index_path %||% "none"))
+  if (!nzchar(spikein_index_path) || identical(tolower(spikein_index_path), "none")) spikein_index_path <- CUTRUN_DEFAULT_SPIKEIN_INDEX
+  if (identical(tolower(normalization_mode), "spikein") && !file.exists(paste0(spikein_index_path, ".1.bt2"))) {
+    return(record_preflight_failure(project, "Bowtie2", "Spike-in normalization was selected, but its Bowtie2 index was not found.", "bowtie2_postprocess"))
+  }
+  design <- cutrun_design(project)
+  input_mode <- if (trimmed) "trimmed reads" else "raw reads"
+  messages <- apply(pairs, 1, function(row) {
+    sample <- row[["sample"]]
+    sample_dir <- file.path(project$data_dir, "bowtie2", sample)
+    target_row <- design[design$sample == sample, , drop = FALSE]
+    is_control <- NROW(target_row) && cutrun_control_like(target_row$target[1])
+    dedup_mode <- if ((is_control && isTRUE(dedup_control)) || (!is_control && isTRUE(dedup_target))) "dedup" else "keepdup"
+    remove_mito_arg <- if (isTRUE(remove_mito)) "y" else "n"
+    target <- cutrun_bowtie2_complete_marker(project, sample)
+    submit_sbatch(
+      project, "Bowtie2", script,
+      c(file.path(sample_dir, sample), res$bowtie2_index, row[["r1"]], row[["r2"]], res$chrom_sizes, project$name, mapq, max_fragment, dedup_mode, remove_mito_arg, normalization_mode, spikein_index_path, spikein_name, spikein_min_reads, "repair"),
+      "bowtie2_postprocess", paste(input_mode, normalization_mode, "post-alignment repair"), sample = sample, target = target, reference = res$label
+    )
+  })
+  paste(messages, collapse = "\n")
 }
 
 submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "stringent") {
@@ -7524,6 +7607,12 @@ server <- function(input, output, session) {
             tags$p(class = "muted small-note", "Choose spikein only when E. coli DNA was intentionally added. The alignment summary will report spike-in reads and the applied scale factor.")
           ),
           "run_cutrun_bowtie2", "Submit Bowtie2"),
+        tool_panel("Post-alignment Repair", status, "Resume incomplete CUT&RUN processing from existing aligned BAMs without repeating Bowtie2.",
+          tagList(
+            uiOutput("cutrun_postprocess_controls_ui"),
+            tags$p(class = "muted small-note", "Only samples with valid aligned and duplicate-removed BAMs but missing downstream fragments or summaries are offered. Temporary sorting uses job-specific project storage instead of compute-node /tmp.")
+          ),
+          "run_cutrun_postprocess", "Repair selected samples", status_step = "Bowtie2", show_sample_progress = FALSE, show_job_actions = FALSE),
         {
           seacr_norm_default <- if (identical(tolower(normalization_choice), "spikein")) "non" else "norm"
           tool_panel("SEACR", status, "Recommended sparse CUT&RUN peak calling from fragment bedGraphs.",
@@ -7714,6 +7803,18 @@ server <- function(input, output, session) {
     )
   })
 
+  output$cutrun_postprocess_controls_ui <- renderUI({
+    p <- current_project(); if (!is_cutrun_project(p)) return(NULL)
+    checks <- cutrun_postprocess_status_table(p)
+    if (!NROW(checks)) return(div(class = "empty-box", "No CUT&RUN samples were found."))
+    repairable <- checks[checks$status == "Repair available", , drop = FALSE]
+    if (!NROW(repairable)) return(tags$p(class = "muted small-note", "No selectively repairable CUT&RUN samples are currently detected."))
+    choices <- stats::setNames(as.character(repairable$sample), paste0(repairable$sample, " — ", repairable$issues))
+    selected <- intersect(as.character(input$cutrun_postprocess_samples %||% character(0)), unname(choices))
+    if (!length(selected)) selected <- as.character(repairable$sample)
+    checkboxGroupInput("cutrun_postprocess_samples", "Incomplete samples to repair", choices = choices, selected = selected)
+  })
+
   for (step in runnable_pipeline_steps()) {
     local({
       this_step <- step
@@ -7813,6 +7914,29 @@ server <- function(input, output, session) {
         spikein_min_reads = input$cutrun_spikein_min_reads %||% "1000"
       ),
       paste(if (trimmed) "trimmed reads" else "raw reads", normalization_choice)
+    )
+  })
+  observeEvent(input$run_cutrun_postprocess, {
+    samples <- input$cutrun_postprocess_samples %||% character(0)
+    trimmed <- isTRUE(input$cutrun_bowtie2_use_trimmed)
+    normalization_choice <- isolate(cutrun_normalization_choice())
+    run_submission(
+      "Bowtie2",
+      submit_cutrun_postprocess_jobs(
+        current_project(), samples,
+        trimmed = trimmed,
+        mapq = input$cutrun_mapq %||% "30",
+        max_fragment = input$cutrun_max_fragment %||% "1000",
+        dedup_target = isTRUE(input$cutrun_dedup_targets),
+        dedup_control = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls),
+        remove_mito = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito),
+        normalization_mode = normalization_choice,
+        spikein_index_path = input$cutrun_spikein_genome %||% CUTRUN_DEFAULT_SPIKEIN_INDEX,
+        spikein_name = CUTRUN_DEFAULT_SPIKEIN_NAME,
+        spikein_min_reads = input$cutrun_spikein_min_reads %||% "1000"
+      ),
+      paste("CUT&RUN post-alignment repair:", paste(samples, collapse = ", ")),
+      samples = samples
     )
   })
   observeEvent(input$run_atac_bowtie2, {
