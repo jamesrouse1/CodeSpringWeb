@@ -3118,8 +3118,10 @@ atac_postprocess_status_table <- function(project) {
       `deduplicated BAM index` = paste0(prefix, "Aligned.sortedByCoord_removeDup.out.bam.bai"),
       `deduplicated BED` = paste0(prefix, "Aligned.sortedByCoord_removeDup.out.bed"),
       `Picard duplicate metrics` = paste0(prefix, "_markedDup_metrics.txt"),
-      `insert-size metrics` = paste0(prefix, "_insert_size_metrics.txt"),
-      `insert-size plot` = paste0(prefix, "_insert_size_histogram.jpg"),
+      if (isTRUE(project$paired_end)) c(
+        `insert-size metrics` = paste0(prefix, "_insert_size_metrics.txt"),
+        `insert-size plot` = paste0(prefix, "_insert_size_histogram.jpg")
+      ),
       bigWig = paste0(prefix, "Aligned.sortedByCoord_removeDup.out.bw"),
       `alignment summary` = paste0(prefix, "_alignment_summary.txt")
     )
