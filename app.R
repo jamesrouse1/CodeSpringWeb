@@ -1635,6 +1635,7 @@ job_error_signal <- function(jobs, step, sample = "") {
     if (NROW(sample_hit)) hit <- sample_hit
   }
   if (!NROW(hit)) return(FALSE)
+  hit <- tail(hit, 1)
   failed_states <- c("FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL")
   if ("slurm_state" %in% names(hit) && any(hit$slurm_state %in% failed_states)) return(TRUE)
   if ("stderr" %in% names(hit)) {
@@ -1643,6 +1644,41 @@ job_error_signal <- function(jobs, step, sample = "") {
     if (length(err) && any(file.info(err)$size > 0, na.rm = TRUE)) return(TRUE)
   }
   FALSE
+}
+
+cutrun_macs_fatal_error_signal <- function(project, jobs, step, sample = "") {
+  if (!is_cutrun_project(project) || !identical(canonical_job_step(step), "MACS2 (optional)")) return(FALSE)
+
+  fatal_pattern <- paste(
+    c(
+      "Traceback \\(most recent call last\\):",
+      "Exception ignored in:",
+      "ValueError: cannot resize",
+      "TypeError:.*NoneType.*not subscriptable",
+      "Segmentation fault",
+      "(^|[[:space:]])Killed([[:space:]]|$)"
+    ),
+    collapse = "|"
+  )
+  has_fatal_text <- function(path) {
+    if (!nzchar(path %||% "") || !file.exists(path) || file_size_for(path) <= 0) return(FALSE)
+    lines <- tryCatch(readLines(path, warn = FALSE), error = function(e) character(0))
+    length(lines) > 0 && any(grepl(fatal_pattern, lines, perl = TRUE))
+  }
+
+  # New CUT&RUN MACS3 runs overwrite this per-sample log, so an old appended
+  # SLURM stderr cannot keep a successfully repaired sample marked as failed.
+  run_log <- file.path(project$data_dir, "macs2", sample, paste0(sample, "_macs3.log"))
+  if (file.exists(run_log)) return(has_fatal_text(run_log))
+
+  if (!NROW(jobs) || !"step" %in% names(jobs)) return(FALSE)
+  hit <- jobs[canonical_job_step(jobs$step) == canonical_job_step(step), , drop = FALSE]
+  if (nzchar(sample %||% "") && "sample" %in% names(hit)) {
+    sample_hit <- hit[nzchar(hit$sample) & hit$sample == sample, , drop = FALSE]
+    if (NROW(sample_hit)) hit <- sample_hit
+  }
+  if (!NROW(hit) || !"stderr" %in% names(hit)) return(FALSE)
+  has_fatal_text(as.character(tail(hit, 1)$stderr[1] %||% ""))
 }
 
 sample_step_data_paths <- function(project, step, samples) {
@@ -2019,7 +2055,7 @@ tool_reference_summary <- function(project) {
     ))
     seacr_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh"), "SEACR_1.3.sh local script; BEDTools/R modules")
     diffbind_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "DiffBind", "cutrun_diffbind.sh"), "R/DiffBind library used by CodeSpringLab")
-    macs2_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "MACS2", "macs2_cutrun_PE.sh"), "MACS2 module listed in CodeSpringLab script")
+    macs2_modules <- module_versions_from_scripts(file.path(SCRIPTS_DIR, "MACS2", "macs2_cutrun_PE.sh"), "MACS caller module listed in CodeSpringLab script")
     ref <- cutrun_reference_resources(project)
     rows <- list(
       c("Reference", "CUT&RUN genome reference", ref$label, paste0(genome_species(project), " / ", genome_reference_key(project)), "Bowtie2, SEACR, MACS2", paste("Bowtie2 index:", ref$bowtie2_index, "| Chrom sizes:", ref$chrom_sizes)),
@@ -2676,10 +2712,7 @@ sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed
         if (length(hits)) hits else file.path(data_dir, "seacr", sample, paste0(sample, ".stringent.bed"))
       },
       "MACS2 (optional)" = {
-        hits <- if (dir.exists(file.path(data_dir, "macs2", sample))) {
-          list.files(file.path(data_dir, "macs2", sample), pattern = "(narrowPeak|broadPeak|peaks\\.xls)$", full.names = TRUE)
-        } else character(0)
-        if (length(hits)) hits else file.path(data_dir, "macs2", sample, paste0(sample, "_peaks.narrowPeak"))
+        file.path(data_dir, "macs2", sample, paste0(sample, "_macs2_complete.txt"))
       },
       character(0)
     ))
@@ -3445,6 +3478,7 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       }
       deleted_outputs <- nzchar(deleted_status) && size == 0 && !active
       error_signal <- job_error_signal(jobs, step, sample)
+      fatal_error_signal <- cutrun_macs_fatal_error_signal(project, jobs, step, sample)
       growing <- active && has_previous && size > previous_size
       optional <- step %in% c("RSEM (optional)", "Kallisto (optional)")
       slurm_running <- active && slurm_state %in% c("RUNNING", "COMPLETING")
@@ -3466,6 +3500,8 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         "Running"
       } else if (active) {
         if (slurm_running) "Running" else "Waiting"
+      } else if (fatal_error_signal) {
+        "Likely failed"
       } else if (error_signal && !complete_outputs) {
         "Likely failed"
       } else if (complete_outputs || (slurm_complete && size > 0)) {
@@ -3479,7 +3515,9 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       } else {
         "Not started"
       }
-      note <- if (identical(status, "Likely failed") && slurm_complete && !complete_outputs) {
+      note <- if (identical(status, "Likely failed") && fatal_error_signal) {
+        "MACS reported an internal peak-calling exception; partial peak files are not accepted as complete."
+      } else if (identical(status, "Likely failed") && slurm_complete && !complete_outputs) {
         "SLURM completed, but the expected output is missing or too small."
       } else if (status == "Likely failed") {
         if (error_signal) "A failed SLURM state or non-empty error log was detected for this sample/step." else paste0("Output exists but is smaller than expected (<", min_size, " bytes).")
@@ -5341,9 +5379,7 @@ submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "auto
   design <- cutrun_target_design(project, include_controls = FALSE)
   if (!NROW(design)) return(record_preflight_failure(project, "MACS2 (optional)", "No non-control CUT&RUN target samples were found. Fill the target column and avoid labeling every row as IgG/input/control.", "macs2"))
   target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) {
-    sample_peak_type <- cutrun_macs2_peak_type_for(project, sample, peak_type)
-    target_suffix <- if (identical(sample_peak_type, "broad")) "_peaks.broadPeak" else "_peaks.narrowPeak"
-    file.path(outdir, sample, paste0(sample, target_suffix))
+    file.path(outdir, sample, paste0(sample, "_macs2_complete.txt"))
   }), as.character(design$sample))
   plan <- sample_submission_plan(project, "MACS2 (optional)", target_list)
   if (!length(plan$samples)) return(plan$message)
@@ -5353,10 +5389,9 @@ submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "auto
     sample_dir <- file.path(outdir, sample)
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     sample_peak_type <- cutrun_macs2_peak_type_for(project, sample, peak_type)
-    target_suffix <- if (identical(sample_peak_type, "broad")) "_peaks.broadPeak" else "_peaks.narrowPeak"
     control <- cutrun_control_sample_for(project, sample)
     control_bam <- if (nzchar(control)) cutrun_bowtie2_bam(project, control) else "none"
-    target <- file.path(sample_dir, paste0(sample, target_suffix))
+    target <- file.path(sample_dir, paste0(sample, "_macs2_complete.txt"))
     submit_sbatch(
       project, "MACS2 (optional)", script,
       c(sample, cutrun_bowtie2_bam(project, sample), control_bam, res$macs2_genome, qvalue, sample_peak_type, sample_dir, project$name),
