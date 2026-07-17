@@ -368,9 +368,9 @@ expanded_bed <- app_env$safe_read_result_table(differential_bed)
 assert(all(c("Fold", "p.value", "FDR") %in% names(expanded_bed)), "ATAC with-stats BED exposes p-value and FDR columns in the Results Explorer")
 comparison_annotation <- file.path(comparison_dir, "DifferentialPeaks_B_vs_A_ref_annotated_with_stats.txt")
 writeLines(c(
-  "PeakID\tGene Name\tAnnotation",
-  "chr1:101-220|Fold=2.5|p.value=0.0002|FDR=0.004\tGeneA\tPromoter",
-  "chr1:501-650|Fold=-1.8|p.value=0.003|FDR=0.02\tGeneB\tIntron"
+  "PeakID\tGene Name\tAnnotation\tDetailed Annotation\tDistance to TSS\tGene Description",
+  "chr1:101-220|Fold=2.5|p.value=0.0002|FDR=0.004\tGeneA\tPromoter\tpromoter-TSS\t15\tSynthetic gene A",
+  "chr1:501-650|Fold=-1.8|p.value=0.003|FDR=0.02\tGeneB\tIntron\tintron (GeneB)\t850\tSynthetic gene B"
 ), comparison_annotation)
 navigation <- app_env$genome_browser_comparison_navigation(comparison_dir)
 assert(all(c("GeneA", "GeneB") %in% unname(navigation$genes)), "genome browser offers annotated differential-peak genes")
@@ -391,10 +391,15 @@ ranked_navigation <- app_env$genome_browser_comparison_navigation(ranking_dir, m
 assert(length(ranked_navigation$peaks) == 200L, "genome browser caps the differential-peak selector at 200 entries")
 assert(grepl("1. chr2:20501-20550", names(ranked_navigation$peaks)[[1]], fixed = TRUE), "strongest differential peak is first in the selector")
 assert(length(ranked_navigation$genes) <= 200L && "Gene205" %in% unname(ranked_navigation$genes), "gene selector uses only top annotated DiffBind genes")
+writeLines(c(
+  "PeakID\tGene Name",
+  "chr9:1-10|Fold=1\tLeanGene"
+), file.path(comparison_dir, "DifferentialPeaks_Z_vs_A_ref_annotated_with_stats.txt"))
 differential_table <- app_env$differential_accessibility_result_table(comparison_dir)
 assert(identical(differential_table[["Genomic interval"]], c("chr1:101-220", "chr1:501-650")), "differential accessibility table includes complete genomic intervals")
 assert(identical(differential_table[["Gene Name"]], c("GeneA", "GeneB")), "differential accessibility table prefers the HOMER-annotated result and displays Gene Name")
 assert(all(c("Fold", "p.value", "FDR") %in% names(differential_table)), "annotated differential accessibility table retains expanded DiffBind statistics")
+assert(all(c("Detailed Annotation", "Distance to TSS", "Gene Description") %in% names(differential_table)), "differential accessibility table chooses the most detailed annotated result available")
 chip_sheet_dir <- file.path(root, "manifest", "chip_diffbind", basename(comparison_dir))
 dir.create(chip_sheet_dir, recursive = TRUE, showWarnings = FALSE)
 comparison_samples <- data.frame(

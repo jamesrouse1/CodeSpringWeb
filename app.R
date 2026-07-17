@@ -3526,9 +3526,21 @@ differential_accessibility_result_table <- function(result_dir, n = 20000) {
   annotated_files <- annotated_files[file.exists(annotated_files) & vapply(annotated_files, file_size_for, numeric(1)) > 0]
   raw_files <- sort(list.files(result_dir, pattern = "^DifferentialPeaks_.*_ref\\.txt$", full.names = TRUE))
   raw_files <- raw_files[file.exists(raw_files) & vapply(raw_files, file_size_for, numeric(1)) > 0]
-  files <- c(annotated_files, raw_files)
-  if (!length(files)) return(data.frame())
-  result <- if (length(annotated_files)) safe_read_result_table(files[[1]], n) else safe_read_table(files[[1]], n)
+  if (!length(annotated_files) && !length(raw_files)) return(data.frame())
+  if (length(annotated_files)) {
+    annotation_headers <- lapply(annotated_files, function(path) safe_read_result_table(path, 1L))
+    annotation_score <- vapply(annotation_headers, function(x) {
+      normalized <- gsub("[^a-z0-9]+", "", tolower(names(x)))
+      NCOL(x) +
+        100L * any(normalized %in% c("genename", "genesymbol", "symbol")) +
+        25L * any(normalized %in% c("detailedannotation", "genedescription", "distancetotss")) +
+        10L * all(c("fold", "pvalue", "fdr") %in% normalized)
+    }, numeric(1))
+    source_file <- annotated_files[[order(-annotation_score, annotated_files)[[1]]]]
+    result <- safe_read_result_table(source_file, n)
+  } else {
+    result <- safe_read_table(raw_files[[1]], n)
+  }
   if (!NROW(result)) return(result)
   peak_id_col <- names(result)[gsub("[^a-z0-9]+", "", tolower(names(result))) %in% c("peakid", "peak")]
   interval <- rep(NA_character_, NROW(result))
@@ -4051,7 +4063,10 @@ atac_results_explorer_ui <- function() {
       tabPanel("Differential Accessibility", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
         mainPanel(width = 10, tabsetPanel(
-          tabPanel("Results", br(), div(class = "differential-accessibility-table", table_output("atac_diffbind_table"))),
+          tabPanel("Results", br(),
+            tags$p(class = "muted small-note", "Detailed differential-accessibility results with full HOMER gene annotation and expanded DiffBind statistics."),
+            div(class = "differential-accessibility-table", table_output("atac_diffbind_table"))
+          ),
           tabPanel("PCA", br(), uiOutput("atac_diffbind_pca_ui")),
           tabPanel("Volcano", br(), uiOutput("atac_diffbind_volcano_ui"))
         ))
