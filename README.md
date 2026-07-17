@@ -186,3 +186,13 @@ Project logs are written under:
 ```text
 <results_root>/<project_name>/log/
 ```
+
+## Tests
+
+With CodeSpringLab checked out beside this repository, run:
+
+```bash
+bash tests/run_all.sh ../CodeSpringLab
+```
+
+This validates project setup, example datasets, pipeline step selection, output detection, retry behavior, SLURM argument construction, Results Explorer helpers, and launcher path isolation without submitting cluster jobs.

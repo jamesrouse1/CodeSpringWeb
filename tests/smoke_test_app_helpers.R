@@ -323,6 +323,81 @@ sample_aware_submitters <- c(
 for (function_name in sample_aware_submitters) {
   assert("samples" %in% names(formals(app_env[[function_name]])), paste(function_name, "accepts explicit sample selection"))
 }
+
+runner_test_root <- file.path(root, "rna-runner-submit")
+dir.create(file.path(runner_test_root, "fastq"), recursive = TRUE)
+runner_design_path <- file.path(runner_test_root, "design_matrix.txt")
+runner_design <- data.frame(
+  sample = "rna1", treatment = "control",
+  filename = "rna1_R1.fastq.gz,rna1_R2.fastq.gz", stringsAsFactors = FALSE
+)
+write.table(runner_design, runner_design_path, sep = "\t", row.names = FALSE, quote = FALSE)
+writeBin(as.raw(rep(1:100, 20)), file.path(runner_test_root, "fastq", "rna1_R1.fastq.gz"))
+writeBin(as.raw(rep(1:100, 20)), file.path(runner_test_root, "fastq", "rna1_R2.fastq.gz"))
+runner_project <- list(
+  id = "runner-rna", name = "runner-rna", analysis_key = "rna", analysis = "RNA-seq",
+  design_matrix_path = runner_design_path, data_dir = file.path(runner_test_root, "data"),
+  results_root = runner_test_root, fastq_dir = file.path(runner_test_root, "fastq"),
+  fastq_dirs = file.path(runner_test_root, "fastq"), paired_end = TRUE,
+  genome = "human", genome_version = "human_gencode50"
+)
+dir.create(runner_project$data_dir, recursive = TRUE)
+fake_gtf <- file.path(runner_test_root, "genes.gtf")
+fake_strand_bed <- file.path(runner_test_root, "strand.bed")
+writeLines("annotation", fake_gtf)
+writeLines("chr1\t1\t10\tgene1", fake_strand_bed)
+captured_submissions <- list()
+original_genome_resources <- app_env$genome_resources
+original_submit_sbatch <- app_env$submit_sbatch
+original_submit_featurecounts_matrix_job <- app_env$submit_featurecounts_matrix_job
+app_env$genome_resources <- function(project) list(
+  star_index = file.path(runner_test_root, "star-index"), label = "test-reference",
+  gtf = fake_gtf, strand_bed = fake_strand_bed
+)
+app_env$submit_sbatch <- function(project, step, script, args, log_name, input_mode = "", sample = "", target = "", reference = "", dependency_ids = character(0)) {
+  captured_submissions[[length(captured_submissions) + 1L]] <<- list(step = step, script = script, args = args)
+  paste("Submitted", step, sample)
+}
+app_env$submit_featurecounts_matrix_job <- function(project, feature = "gene_name", dependency_ids = character(0)) "Matrix build captured"
+on.exit({
+  app_env$genome_resources <- original_genome_resources
+  app_env$submit_sbatch <- original_submit_sbatch
+  app_env$submit_featurecounts_matrix_job <- original_submit_featurecounts_matrix_job
+}, add = TRUE)
+
+invisible(app_env$submit_star_jobs(runner_project, trimmed = FALSE, samples = "rna1"))
+star_submission <- captured_submissions[[length(captured_submissions)]]
+expected_star_runner <- file.path(app_env$SCRIPTS_DIR, "STAR", "star_PE.sh")
+assert(identical(tail(star_submission$args, 1), expected_star_runner), "STAR submission passes an absolute runner path to SLURM")
+
+star_dir <- file.path(runner_project$data_dir, "star", "rna1")
+dir.create(star_dir, recursive = TRUE, showWarnings = FALSE)
+writeBin(as.raw(rep(1:100, 30)), file.path(star_dir, "rna1Aligned.sortedByCoord.out.bam"))
+invisible(app_env$submit_featurecounts_jobs(runner_project, feature = "gene_name", samples = "rna1"))
+feature_submission <- captured_submissions[[length(captured_submissions)]]
+expected_feature_runner <- file.path(app_env$SCRIPTS_DIR, "featureCounts", "featurecounts_PE.sh")
+assert(identical(tail(feature_submission$args, 1), expected_feature_runner), "featureCounts submission passes an absolute runner path to SLURM")
+
+runner_project$paired_end <- FALSE
+runner_design$filename <- "rna1_R1.fastq.gz"
+write.table(runner_design, runner_design_path, sep = "\t", row.names = FALSE, quote = FALSE)
+unlink(star_dir, recursive = TRUE)
+invisible(app_env$submit_star_jobs(runner_project, trimmed = FALSE, samples = "rna1"))
+star_se_submission <- captured_submissions[[length(captured_submissions)]]
+expected_star_se_runner <- file.path(app_env$SCRIPTS_DIR, "STAR", "star_SE.sh")
+assert(identical(tail(star_se_submission$args, 1), expected_star_se_runner), "single-end STAR submission passes its absolute runner path to SLURM")
+assert(length(star_se_submission$args) == 5L, "single-end STAR submission omits the unused R2 argument")
+
+dir.create(star_dir, recursive = TRUE, showWarnings = FALSE)
+writeBin(as.raw(rep(1:100, 30)), file.path(star_dir, "rna1Aligned.sortedByCoord.out.bam"))
+invisible(app_env$submit_featurecounts_jobs(runner_project, feature = "gene_id", samples = "rna1"))
+feature_se_submission <- captured_submissions[[length(captured_submissions)]]
+expected_feature_se_runner <- file.path(app_env$SCRIPTS_DIR, "featureCounts", "featurecounts_SE.sh")
+assert(identical(tail(feature_se_submission$args, 1), expected_feature_se_runner), "single-end featureCounts submission passes its absolute runner path to SLURM")
+
+app_env$genome_resources <- original_genome_resources
+app_env$submit_sbatch <- original_submit_sbatch
+app_env$submit_featurecounts_matrix_job <- original_submit_featurecounts_matrix_job
 assert(identical(app_env$requested_sample_subset(atac_project, c("A1", "A2"), "A2", "test step"), "A2"), "unchecked samples are excluded from submission")
 cutrun_example_project <- chip_project
 cutrun_example_project$analysis_key <- "cutrun"

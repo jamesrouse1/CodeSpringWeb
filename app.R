@@ -6968,13 +6968,21 @@ submit_star_jobs <- function(project, trimmed = FALSE, samples = NULL) {
   if (!length(plan$samples)) return(plan$message)
   pairs <- pairs[pairs$sample %in% plan$samples, , drop = FALSE]
   script <- file.path(SCRIPTS_DIR, "STAR", if (project$paired_end) "qsub_star_PE.sh" else "qsub_star_SE.sh")
+  runner <- file.path(SCRIPTS_DIR, "STAR", if (project$paired_end) "star_PE.sh" else "star_SE.sh")
+  missing_scripts <- c(script, runner)[!file.exists(c(script, runner))]
+  if (length(missing_scripts)) {
+    return(record_preflight_failure(project, "STAR", paste("Required STAR scripts are missing:", paste(missing_scripts, collapse = ", ")), "star"))
+  }
   messages <- apply(pairs, 1, function(row) {
     sample_dir <- file.path(outdir, row[["sample"]])
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     out_prefix <- file.path(sample_dir, row[["sample"]])
     input_mode <- if (trimmed) "trimmed reads" else "raw reads"
     target <- file.path(sample_dir, paste0(row[["sample"]], "Aligned.sortedByCoord.out.bam"))
-    submit_sbatch(project, "STAR", script, c(out_prefix, res$star_index, row[["r1"]], row[["r2"]], project$name), "star", input_mode, sample = row[["sample"]], target = target, reference = res$label)
+    star_args <- c(out_prefix, res$star_index, row[["r1"]])
+    if (project$paired_end) star_args <- c(star_args, row[["r2"]])
+    star_args <- c(star_args, project$name, runner)
+    submit_sbatch(project, "STAR", script, star_args, "star", input_mode, sample = row[["sample"]], target = target, reference = res$label)
   })
   paste(append_plan_message(messages, plan), collapse = "\n")
 }
@@ -7108,13 +7116,18 @@ submit_featurecounts_jobs <- function(project, feature = "gene_name", samples = 
     return(plan$message)
   }
   samples_to_run <- as.character(design$sample[design$sample %in% plan$samples])
+  runner <- file.path(SCRIPTS_DIR, "featureCounts", if (project$paired_end) "featurecounts_PE.sh" else "featurecounts_SE.sh")
+  missing_scripts <- c(script, runner)[!file.exists(c(script, runner))]
+  if (length(missing_scripts)) {
+    return(record_preflight_failure(project, "featureCounts", paste("Required featureCounts scripts are missing:", paste(missing_scripts, collapse = ", ")), "featurecounts"))
+  }
   messages <- vapply(samples_to_run, function(sample) {
     sample_dir <- file.path(outdir, sample)
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     bam <- file.path(project$data_dir, "star", sample, paste0(sample, "Aligned.sortedByCoord.out.bam"))
     count_prefix <- file.path(sample_dir, sample)
     target <- paste0(count_prefix, "_counts.txt")
-    submit_sbatch(project, "featureCounts", script, c(bam, res$gtf, feature, count_prefix, res$strand_bed, project$name), "featurecounts", paste("STAR BAM; feature", feature), sample = sample, target = target, reference = res$gtf)
+    submit_sbatch(project, "featureCounts", script, c(bam, res$gtf, feature, count_prefix, res$strand_bed, project$name, runner), "featurecounts", paste("STAR BAM; feature", feature), sample = sample, target = target, reference = res$gtf)
   }, character(1))
   ids <- vapply(messages, parse_sbatch_job_id, character(1))
   if (target_outputs_ready_or_planned(all_targets, plan$samples, minimum_expected_bytes("featureCounts"))) {
