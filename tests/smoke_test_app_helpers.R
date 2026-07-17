@@ -56,6 +56,15 @@ for (project_variant in list(
   step_meta <- app_env$run_step_meta(project_variant)
   assert(NROW(step_meta) == length(app_env$pipeline_order(project_variant)), paste(project_variant$analysis, "stepper descriptions match its pipeline"))
 }
+for (project_variant in list(
+  within(chip_project, { analysis_key <- "cutrun"; analysis <- "CUT&RUN" }),
+  within(chip_project, { analysis_key <- "atac"; analysis <- "ATAC-seq" }),
+  chip_project
+)) {
+  assert(identical(tail(app_env$pipeline_order(project_variant), 1), "Peak Annotation"), paste(project_variant$analysis, "ends with Peak Annotation"))
+}
+assert(identical(app_env$canonical_job_step("peak_annotation"), "Peak Annotation"), "peak annotation job labels canonicalize")
+assert(identical(app_env$step_data_paths(chip_project, "Peak Annotation"), file.path(root, "peak_annotation")), "peak annotation cleanup is confined to its project folder")
 
 blank_editor <- app_env$blank_design_matrix_rows(c("condition", "replicate"), rows = 3)
 assert(NROW(blank_editor) == 3L && all(!blank_editor$include), "blank design setup provides editable excluded rows")
@@ -227,6 +236,7 @@ for (ui_check in list(
 assert(grepl("Initial QC", chip_ui_text, fixed = TRUE) && grepl("Fragment Size", chip_ui_text, fixed = TRUE), "ChIP Results Explorer includes RNA-style QC navigation")
 assert(grepl("Signal Tracks", atac_ui_text, fixed = TRUE) && grepl("Signal Tracks", chip_ui_text, fixed = TRUE), "ATAC and ChIP Results Explorers expose signal-track navigation")
 assert(all(vapply(list(atac_ui_text, chip_ui_text, cutrun_ui_text), grepl, logical(1), pattern = "Genome Browser", fixed = TRUE)), "ATAC, ChIP, and CUT&RUN Results Explorers expose the embedded genome browser")
+assert(all(vapply(list(atac_ui_text, chip_ui_text, cutrun_ui_text), grepl, logical(1), pattern = "Gene Annotation", fixed = TRUE)), "all peak Results Explorers expose gene annotations")
 assert(grepl("cutrun_file_sample_ui", cutrun_ui_text, fixed = TRUE), "CUT&RUN file explorer exposes a sample selector")
 assert(grepl("height:680px", app_env$app_css, fixed = TRUE), "fragment plots share a fixed display height")
 
@@ -316,5 +326,23 @@ assert(app_env$diffbind_comparison_active(atac_project, comparison_dir, jobs = a
 unlink(file.path(comparison_dir, "_RUN_STARTED"))
 writeLines("status\tcomplete", file.path(comparison_dir, "_COMPLETE"))
 assert(app_env$diffbind_comparison_complete(comparison_dir), "final DiffBind marker accepted")
+
+annotation_inputs <- app_env$peak_annotation_input_files(atac_project)
+assert(legacy_peak %in% annotation_inputs, "peak annotation discovers completed per-sample MACS2 peaks")
+annotation_root <- file.path(root, "peak_annotation")
+dir.create(annotation_root, recursive = TRUE)
+annotated_peak <- file.path(sample_dir, "A1_peaks_annotated.txt")
+writeLines("PeakID\tAnnotation\npeak1\tPromoter", annotated_peak)
+write.table(data.frame(
+  result_type = "MACS2", sample_or_comparison = "A1", peak_count = 2,
+  source_peak_file = legacy_peak, annotated_file = annotated_peak, status = "complete",
+  stringsAsFactors = FALSE
+), file.path(annotation_root, "peak_annotation_summary.tsv"), sep = "\t", row.names = FALSE, quote = FALSE)
+Sys.sleep(0.01)
+writeLines(c("status\tcomplete", "annotated_files\t1"), file.path(annotation_root, "_COMPLETE"))
+assert(app_env$peak_annotation_is_current(atac_project, legacy_peak), "current annotations are not resubmitted")
+assert(identical(app_env$peak_annotation_status(atac_project, data.frame()), "Complete"), "annotation completion marker drives pipeline status")
+assert(NROW(app_env$peak_annotation_summary_table(atac_project)) == 1L, "annotation summary is available to the Results Explorer")
+assert(annotated_peak %in% unname(app_env$peak_annotation_result_files(atac_project)), "annotated peak tables are discoverable in Results Explorer")
 
 cat("CodeSpringApp fake-data helper smoke tests passed.\n")

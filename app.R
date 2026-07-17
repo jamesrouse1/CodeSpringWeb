@@ -1422,6 +1422,53 @@ peak_diffbind_status <- function(project) {
   if (any(vapply(dirs, diffbind_comparison_complete, logical(1)))) "Complete" else "Not started"
 }
 
+peak_annotation_input_files <- function(project) {
+  data_dir <- project$data_dir
+  collect <- function(root, pattern) {
+    if (!dir.exists(root)) return(character(0))
+    list.files(root, pattern = pattern, recursive = TRUE, full.names = TRUE)
+  }
+  files <- unique(c(
+    collect(file.path(data_dir, "macs2"), "_peaks\\.(narrowPeak|broadPeak)$"),
+    collect(file.path(data_dir, "diffbind"), "\\.with_stats\\.bed$"),
+    collect(file.path(data_dir, "cutrun_diffbind"), "^(all_differential_peaks\\.tsv|significant_differential_peaks\\.bed)$")
+  ))
+  legacy <- collect(file.path(data_dir, "diffbind"), "^DifferentialPeaks_.*_ref\\.txt$")
+  legacy <- legacy[!file.exists(sub("\\.txt$", ".with_stats.bed", legacy))]
+  files <- unique(c(files, legacy))
+  files[file.exists(files) & vapply(files, file_size_for, numeric(1)) > 0]
+}
+
+peak_annotation_result_files <- function(project) {
+  roots <- file.path(project$data_dir, c("macs2", "diffbind", "cutrun_diffbind"))
+  files <- unlist(lapply(roots[dir.exists(roots)], function(root) {
+    list.files(root, pattern = "_annotated(_with_stats)?\\.txt$", recursive = TRUE, full.names = TRUE)
+  }), use.names = FALSE)
+  files <- sort(unique(files[file.exists(files) & vapply(files, file_size_for, numeric(1)) > 0]))
+  stats::setNames(files, relative_result_labels(project, files))
+}
+
+peak_annotation_status <- function(project, jobs = NULL) {
+  marker <- file.path(project$data_dir, "peak_annotation", "_COMPLETE")
+  if (file.exists(marker) && file_size_for(marker) > 0) return("Complete")
+  if (is.null(jobs)) jobs <- job_history(project)
+  if (!NROW(jobs) || !"step" %in% names(jobs)) return("Not started")
+  hit <- jobs[canonical_job_step(jobs$step) == "Peak Annotation", , drop = FALSE]
+  if (!NROW(hit)) return("Not started")
+  latest <- hit[NROW(hit), , drop = FALSE]
+  state <- toupper(as.character(latest$slurm_state %||% ""))
+  if (state %in% active_slurm_states() || state == "SUBMITTED") return("Active")
+  if (grepl("CANCEL", state)) return("Cancelled")
+  if (state %in% c("COMPLETED", "FAILED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "BOOT_FAIL")) return("Likely failed")
+  "Not started"
+}
+
+peak_annotation_summary_table <- function(project) {
+  path <- file.path(project$data_dir, "peak_annotation", "peak_annotation_summary.tsv")
+  if (!file.exists(path) || file_size_for(path) <= 0) return(data.frame())
+  safe_read_table(path, 10000)
+}
+
 cutadapt_outputs_available <- function(project) {
   count_files(file.path(project$data_dir, "cutadapt"), fastq_suffix_regex) > 0
 }
@@ -1995,6 +2042,7 @@ step_data_paths <- function(project, step, samples = NULL) {
     "SEACR" = file.path(data_dir, "seacr"),
     "Peak QC" = file.path(data_dir, "cutrun_peak_qc"),
     "Differential Peaks" = file.path(data_dir, if (is_atac_project(project) || is_chip_project(project)) "diffbind" else "cutrun_diffbind"),
+    "Peak Annotation" = file.path(data_dir, "peak_annotation"),
     "MACS2 Peaks" = file.path(data_dir, "macs2"),
     "MACS2 (optional)" = file.path(data_dir, "macs2"),
     "featureCounts" = c(
@@ -2115,6 +2163,7 @@ canonical_job_step <- function(x) {
     bowtie2 = "Bowtie2",
     seacr = "SEACR",
     macs2 = "MACS2 (optional)",
+    peakannotation = "Peak Annotation",
     diffbind = "Differential Peaks",
     differentialpeaks = "Differential Peaks",
     macs2peaks = "MACS2 Peaks",
@@ -2680,9 +2729,10 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (count_files(file.path(data_dir, "fastqc"), "\\.html$") + count_files(file.path(data_dir, "fastqc_cutadapt"), "\\.html$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "bowtie2"), "_alignment_summary\\.txt$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started",
-        peak_diffbind_status(project)
+        peak_diffbind_status(project),
+        peak_annotation_status(project, jobs)
       ),
-      path = c(design, file.path(data_dir, "cutadapt"), file.path(data_dir, "fastqc"), file.path(data_dir, "bowtie2"), file.path(data_dir, "macs2"), file.path(data_dir, "diffbind")),
+      path = c(design, file.path(data_dir, "cutadapt"), file.path(data_dir, "fastqc"), file.path(data_dir, "bowtie2"), file.path(data_dir, "macs2"), file.path(data_dir, "diffbind"), file.path(data_dir, "peak_annotation")),
       stringsAsFactors = FALSE
     )
     modes <- last_job_modes_from_jobs(jobs)
@@ -2727,7 +2777,8 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (count_files(file.path(data_dir, "seacr"), "\\.bed$") + count_files(file.path(data_dir, "seacr"), "\\.bedgraph$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "cutrun_peak_qc"), "^seacr_consensus_peaks\\.bed$") > 0) "Complete" else "Not started",
         if (file.exists(file.path(data_dir, "cutrun_diffbind", "_COMPLETE")) || count_files(file.path(data_dir, "cutrun_diffbind"), "^_COMPLETE$") > 0) "Complete" else "Not started",
-        if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started"
+        if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started",
+        peak_annotation_status(project, jobs)
       ),
       path = c(
         design,
@@ -2737,7 +2788,8 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         file.path(data_dir, "seacr"),
         file.path(data_dir, "cutrun_peak_qc"),
         file.path(data_dir, "cutrun_diffbind"),
-        file.path(data_dir, "macs2")
+        file.path(data_dir, "macs2"),
+        file.path(data_dir, "peak_annotation")
       ),
       stringsAsFactors = FALSE
     )
@@ -2865,15 +2917,15 @@ rna_pipeline_order <- function() {
 }
 
 cutrun_pipeline_order <- function() {
-  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "Peak QC", "Differential Peaks", "MACS2 (optional)")
+  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "Peak QC", "Differential Peaks", "MACS2 (optional)", "Peak Annotation")
 }
 
 atac_pipeline_order <- function() {
-  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks", "Differential Peaks")
+  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks", "Differential Peaks", "Peak Annotation")
 }
 
 chip_pipeline_order <- function() {
-  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks", "Differential Peaks")
+  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "MACS2 Peaks", "Differential Peaks", "Peak Annotation")
 }
 
 all_pipeline_steps <- function() {
@@ -3062,6 +3114,7 @@ minimum_expected_bytes <- function(step) {
     "SEACR" = 10,
     "MACS2 Peaks" = 10,
     "MACS2 (optional)" = 10,
+    "Peak Annotation" = 10,
     "RSEM (optional)" = 100,
     "Kallisto (optional)" = 100,
     "featureCounts" = 100,
@@ -3368,15 +3421,35 @@ genome_browser_ui <- function() {
   )
 }
 
+peak_annotation_results_ui <- function() {
+  br()
+  sidebarLayout(
+    sidebarPanel(
+      width = 3,
+      uiOutput("peak_annotation_file_ui"),
+      tags$hr(),
+      helpText("HOMER reports the nearest gene/TSS and genomic annotation. Peak statistics from MACS2 or differential analysis are retained in PeakID.")
+    ),
+    mainPanel(
+      width = 9,
+      div(class = "cutrun-section-heading", tags$h4("Annotation run summary"), tags$p("Every eligible sample and differential comparison processed by the final annotation step.")),
+      table_output("peak_annotation_summary"),
+      tags$hr(),
+      tags$h4("Selected gene-annotation table"),
+      table_output("peak_annotation_table")
+    )
+  )
+}
+
 cutrun_files_by_category <- function(project, category = "all") {
   category <- category %||% "all"
   files <- switch(category,
     qc = unlist(lapply(file.path(project$data_dir, c("fastqc", "fastqc_cutadapt")), function(path) if (dir.exists(path)) list.files(path, pattern = "\\.(html|zip)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)), use.names = FALSE),
     alignment = result_file_choices(project, "bowtie2", "\\.(bam|bai|txt|jpg|jpeg|png|pdf)$"),
     signal = result_file_choices(project, "bowtie2", "\\.(bw|bedgraph)$"),
-    peaks = result_file_choices(project, c("seacr", "cutrun_dedup_sensitivity", "macs2", "cutrun_peak_qc"), "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv)$"),
+    peaks = result_file_choices(project, c("seacr", "cutrun_dedup_sensitivity", "macs2", "cutrun_peak_qc", "peak_annotation"), "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv)$"),
     differential = result_file_choices(project, "cutrun_diffbind", "\\.(bed|txt|tsv|csv|png|pdf|rds)$"),
-    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "seacr", "cutrun_dedup_sensitivity", "macs2", "cutrun_peak_qc", "cutrun_diffbind"), "\\.(html|zip|bam|bai|bw|bedgraph|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
+    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "seacr", "cutrun_dedup_sensitivity", "macs2", "cutrun_peak_qc", "cutrun_diffbind", "peak_annotation"), "\\.(html|zip|bam|bai|bw|bedgraph|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
   )
   files <- unname(files)
   files <- sort(unique(files[file.exists(files)]))
@@ -3524,9 +3597,9 @@ atac_files_by_category <- function(project, category = "all") {
     qc = unlist(lapply(file.path(project$data_dir, c("fastqc", "fastqc_cutadapt")), function(path) if (dir.exists(path)) list.files(path, pattern = "\\.(html|zip)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)), use.names = FALSE),
     alignment = result_file_choices(project, "bowtie2", "\\.(bam|bai|txt|jpg|jpeg|png|pdf)$"),
     signal = result_file_choices(project, "bowtie2", "\\.(bw|bedgraph|bdg)$"),
-    peaks = result_file_choices(project, "macs2", "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv|png|pdf)$"),
+    peaks = result_file_choices(project, c("macs2", "peak_annotation"), "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv|png|pdf)$"),
     differential = result_file_choices(project, "diffbind", "\\.(bed|txt|tsv|csv|png|pdf|rds)$"),
-    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "macs2", "diffbind"), "\\.(html|zip|bam|bai|bw|bedgraph|bdg|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
+    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "macs2", "diffbind", "peak_annotation"), "\\.(html|zip|bam|bai|bw|bedgraph|bdg|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
   )
   files <- unname(files)
   files <- sort(unique(files[file.exists(files)]))
@@ -3639,6 +3712,7 @@ atac_results_explorer_ui <- function() {
             tabPanel("TSS Heatmap", br(), uiOutput("atac_peak_heatmap_ui"))
           ))
         )),
+        tabPanel("Gene Annotation", peak_annotation_results_ui()),
         tabPanel("Signal Tracks", br(),
           div(class = "cutrun-section-heading", tags$h4("Genome-browser tracks"), tags$p("Per-sample bigWig and bedGraph files with their saved normalization.")),
           table_output("atac_signal_tracks")
@@ -3685,6 +3759,7 @@ chip_results_explorer_ui <- function() {
           sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ChIP-seq peak calls.")),
           mainPanel(width = 10, table_output("atac_peak_table"))
         )),
+        tabPanel("Gene Annotation", peak_annotation_results_ui()),
         tabPanel("Signal Tracks", br(),
           div(class = "cutrun-section-heading", tags$h4("Genome-browser tracks"), tags$p("Target and input-control bigWig/bedGraph files with their saved normalization.")),
           table_output("atac_signal_tracks")
@@ -3930,7 +4005,8 @@ cutrun_results_explorer_ui <- function() {
                   ),
                   mainPanel(width = 9, table_output("cutrun_macs2_peak_table"))
                 )
-              )
+              ),
+              tabPanel("Gene Annotation", peak_annotation_results_ui())
             )
           ),
           tabPanel("Differential Binding",
@@ -4718,6 +4794,8 @@ cutrun_reference_resources <- function(project) {
       label = "Human GRCh38 / GENCODE v50 Bowtie2 CUT&RUN reference",
       bowtie2_index = "/grid/bsr/data/data/utama/genome/human_gencode50/bowtie2_index/GRCh38_gencode50",
       chrom_sizes = "/grid/bsr/data/data/utama/genome/human_gencode50/GRCh38.chrom.sizes",
+      gtf = "/grid/bsr/data/data/utama/genome/human_gencode50/gencode.v50.primary_assembly.annotation.gtf",
+      homer_genome = "hg38",
       macs2_genome = "hs",
       blacklist = ""
     )
@@ -4726,6 +4804,8 @@ cutrun_reference_resources <- function(project) {
       label = "Mouse GRCm39 / GENCODE M39 Bowtie2 CUT&RUN reference",
       bowtie2_index = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/bowtie2_index/GRCm39_gencodeM39",
       chrom_sizes = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/GRCm39.chrom.sizes",
+      gtf = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/gencode.vM39.primary_assembly.annotation.gtf",
+      homer_genome = "mm39",
       macs2_genome = "mm",
       blacklist = file.path(SCRIPTS_DIR, "test", "manifest_atac", "mm39-blacklist.bed")
     )
@@ -5936,6 +6016,55 @@ submit_atac_diffbind_job <- function(project, compare_col, reference, comparison
     "diffbind_atac", paste(if (nzchar(subset_col)) paste0(subset_col, "=", subset_value, ";") else "all samples;", compare_col, comparison, "vs", reference, "GRCm39/M39"), sample = slug, target = target, reference = res$label)
 }
 
+peak_annotation_is_current <- function(project, inputs = peak_annotation_input_files(project)) {
+  marker <- file.path(project$data_dir, "peak_annotation", "_COMPLETE")
+  summary_path <- file.path(project$data_dir, "peak_annotation", "peak_annotation_summary.tsv")
+  if (!length(inputs) || !file.exists(marker) || file_size_for(marker) <= 0 || !file.exists(summary_path)) return(FALSE)
+  summary <- tryCatch(utils::read.delim(summary_path, stringsAsFactors = FALSE, check.names = FALSE), error = function(e) data.frame())
+  if (!NROW(summary) || !all(c("source_peak_file", "annotated_file", "status") %in% names(summary))) return(FALSE)
+  covered <- all(inputs %in% as.character(summary$source_peak_file))
+  outputs <- unique(as.character(summary$annotated_file))
+  outputs_ok <- length(outputs) > 0 && all(file.exists(outputs)) && all(vapply(outputs, file_size_for, numeric(1)) > 0)
+  marker_time <- file.info(marker)$mtime
+  inputs_current <- all(file.info(inputs)$mtime <= marker_time)
+  isTRUE(covered && outputs_ok && inputs_current && all(summary$status == "complete"))
+}
+
+submit_peak_annotation_job <- function(project) {
+  if (!is_atac_project(project) && !is_chip_project(project) && !is_cutrun_project(project)) {
+    return(record_preflight_failure(project, "Peak Annotation", "Peak annotation is available for ATAC-seq, ChIP-seq, and CUT&RUN projects.", "peak_annotation"))
+  }
+  inputs <- peak_annotation_input_files(project)
+  if (!length(inputs)) {
+    return(record_preflight_failure(project, "Peak Annotation", "No non-empty completed MACS2 or differential peak files were found. Run peak calling or differential peaks first.", "peak_annotation"))
+  }
+  jobs <- job_history(project)
+  if (NROW(jobs) && all(c("step", "slurm_state") %in% names(jobs))) {
+    active <- jobs[canonical_job_step(jobs$step) == "Peak Annotation" & jobs$slurm_state %in% active_slurm_states(), , drop = FALSE]
+    if (NROW(active)) return("Peak Annotation is already active; no duplicate job was submitted.")
+  }
+  if (peak_annotation_is_current(project, inputs)) {
+    return("Peak Annotation is already complete and current for every eligible peak file. New or updated peak results will make this step runnable again.")
+  }
+  qsub <- file.path(SCRIPTS_DIR, "Homer", "qsub_annotate_peak_results.sh")
+  runner <- file.path(SCRIPTS_DIR, "Homer", "annotate_peak_results.sh")
+  ref <- if (is_chip_project(project)) chip_reference_resources(project) else if (is_atac_project(project)) atac_reference_resources(project) else cutrun_reference_resources(project)
+  required <- c(qsub, runner, ref$gtf)
+  missing <- required[!file.exists(required) | vapply(required, file_size_for, numeric(1)) <= 0]
+  if (length(missing)) {
+    return(record_preflight_failure(project, "Peak Annotation", paste("Required peak-annotation resources are missing:", paste(missing, collapse = ", ")), "peak_annotation"))
+  }
+  outdir <- file.path(project$data_dir, "peak_annotation")
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+  marker <- file.path(outdir, "_COMPLETE")
+  submit_sbatch(
+    project, "Peak Annotation", qsub,
+    c(project$data_dir, ref$homer_genome, ref$gtf, runner),
+    "peak_annotation", paste(length(inputs), "MACS2/differential peak files"),
+    target = marker, reference = paste(ref$label, basename(ref$gtf))
+  )
+}
+
 submit_cutrun_bowtie2_jobs <- function(project, trimmed = TRUE, mapq = 30, max_fragment = 1000,
                                        dedup_target = FALSE, dedup_control = TRUE, remove_mito = TRUE,
                                        normalization_mode = "spikein", spikein_index_path = CUTRUN_DEFAULT_SPIKEIN_INDEX,
@@ -7005,7 +7134,8 @@ run_step_meta <- function(project = NULL) {
       "Call sparse CUT&RUN peaks with SEACR.",
       "Build consensus SEACR peaks, peak counts, and FRiP summaries.",
       "Build mark-specific consensus peaks and run DiffBind/DESeq2 differential binding.",
-      "Optional MACS2 peak calling for comparison or broad histone marks."
+      "Optional MACS2 peak calling for comparison or broad histone marks.",
+      "Annotate every completed MACS2 and differential peak file with nearby genes."
     )
   } else if (!is.null(project) && is_atac_project(project)) {
     c(
@@ -7014,7 +7144,8 @@ run_step_meta <- function(project = NULL) {
       "Generate per-read quality reports.",
       "Align paired-end fragments to the GRCm39/GENCODE M39 Bowtie2 index and create duplicate-removed CPM bigWigs.",
       "Call shifted ATAC-seq peaks with MACS2 and annotate them with Homer.",
-      "Build a consensus peakset and test differential accessibility with DiffBind/DESeq2."
+      "Build a consensus peakset and test differential accessibility with DiffBind/DESeq2.",
+      "Annotate every completed MACS2 and differential peak file with nearby genes."
     )
   } else if (!is.null(project) && is_chip_project(project)) {
     c(
@@ -7023,7 +7154,8 @@ run_step_meta <- function(project = NULL) {
       "Generate per-read quality reports.",
       "Align ChIP and matched-input reads with Bowtie2 and create duplicate-removed CPM bigWigs.",
       "Call ChIP peaks against each target's matched input with MACS2.",
-      "Build a target-only consensus peakset and test differential binding with DiffBind/DESeq2."
+      "Build a target-only consensus peakset and test differential binding with DiffBind/DESeq2.",
+      "Annotate every completed MACS2 and differential peak file with nearby genes."
     )
   } else {
     c(
@@ -9113,7 +9245,11 @@ server <- function(input, output, session) {
         tool_panel("Differential Peaks", status, "Test differential ChIP binding from completed target-only MACS2 peaks and ChIP BAMs.", tagList(
           uiOutput("atac_diffbind_controls_ui"),
           tags$p(class = "muted small-note", "Input controls are excluded from the DiffBind replicate count. Each condition requires at least two ChIP target libraries; MACS2 has already applied each target's matched input control.")
-        ), "run_chip_diffbind", "Submit DiffBind", data.frame())
+        ), "run_chip_diffbind", "Submit DiffBind", data.frame()),
+        tool_panel("Peak Annotation", status, "Annotate every completed ChIP MACS2 and differential peak file with nearby genes.", tagList(
+          tags$p(class = "muted small-note", "This project-level final step scans all completed samples and comparisons, preserves peak statistics, and writes HOMER annotation tables beside the source peak files."),
+          tags$p(class = "muted small-note", "It is safe to run again after new peak results are created; current annotation outputs are skipped by the app.")
+        ), "run_peak_annotation", "Annotate all completed peaks", show_sample_progress = FALSE)
       ))
     }
     if (is_cutrun_project(p)) {
@@ -9203,7 +9339,11 @@ server <- function(input, output, session) {
             selectInput("cutrun_macs2_peak_type", "Peak type", choices = c("Automatic from target_class" = "auto", "Narrow for every target" = "narrow", "Broad for every target" = "broad"), selected = selected_choice(input$cutrun_macs2_peak_type, c("auto", "narrow", "broad"), "auto"), selectize = FALSE),
             tags$p(class = "muted small-note", "Automatic uses broad for histone_broad and narrow for histone_narrow or tf_or_other. This setting affects only optional MACS2; SEACR retains native enriched-region widths.")
           ),
-          "run_cutrun_macs2", "Submit MACS2")
+          "run_cutrun_macs2", "Submit MACS2"),
+        tool_panel("Peak Annotation", status, "Annotate every completed CUT&RUN MACS2 and differential peak file with nearby genes.", tagList(
+          tags$p(class = "muted small-note", "This project-level final step scans all completed samples and differential comparisons. Both all-peak and significant differential result files are annotated."),
+          tags$p(class = "muted small-note", "Peak statistics are retained in the HOMER PeakID field, and a project summary records every source and annotated file.")
+        ), "run_peak_annotation", "Annotate all completed peaks", show_sample_progress = FALSE)
       ))
     }
     if (is_atac_project(p)) {
@@ -9226,7 +9366,11 @@ server <- function(input, output, session) {
           tags$p(class = "muted small-note", "The app uses a lightweight 24 GB job when only the BAM index or CPM bigWig needs repair. Missing Picard, BED, or insert-size outputs trigger the full 96 GB post-alignment repair. Outputs are replaced only after validation succeeds.")
         ), "run_atac_postprocess", "Repair selected samples", status_step = "Bowtie2", show_sample_progress = FALSE, show_job_actions = FALSE),
         tool_panel("MACS2 Peaks", status, "Call shifted ATAC-seq peaks and generate TSS heatmaps and Homer annotations.", tagList(uiOutput("atac_macs2_samples_ui"), textInput("atac_macs2_qvalue", "MACS2 q-value", value = input$atac_macs2_qvalue %||% "0.05")), "run_atac_macs2", "Submit MACS2"),
-        tool_panel("Differential Peaks", status, "Build the DiffBind consensus peakset and test differential accessibility.", tagList(uiOutput("atac_diffbind_controls_ui"), tags$p(class = "muted small-note", "Requires at least two biological replicates per selected condition.")), "run_atac_diffbind", "Submit DiffBind", data.frame())
+        tool_panel("Differential Peaks", status, "Build the DiffBind consensus peakset and test differential accessibility.", tagList(uiOutput("atac_diffbind_controls_ui"), tags$p(class = "muted small-note", "Requires at least two biological replicates per selected condition.")), "run_atac_diffbind", "Submit DiffBind", data.frame()),
+        tool_panel("Peak Annotation", status, "Annotate every completed ATAC MACS2 and differential peak file with nearby genes.", tagList(
+          tags$p(class = "muted small-note", "This project-level final step scans all completed samples and comparisons, preserves peak statistics, and writes HOMER annotation tables beside the source peak files."),
+          tags$p(class = "muted small-note", "A central summary under data/peak_annotation records every annotation output.")
+        ), "run_peak_annotation", "Annotate all completed peaks", show_sample_progress = FALSE)
       ))
     }
     div(class = "run-grid",
@@ -9652,6 +9796,14 @@ server <- function(input, output, session) {
       samples = samples
     )
   })
+  observeEvent(input$run_peak_annotation, {
+    inputs <- peak_annotation_input_files(current_project())
+    run_submission(
+      "Peak Annotation",
+      submit_peak_annotation_job(current_project()),
+      paste(length(inputs), "completed MACS2/differential peak file(s)")
+    )
+  })
   observeEvent(input$run_star, {
     trimmed <- isTRUE(input$star_use_trimmed)
     samples <- input$rna_star_samples %||% character(0)
@@ -9954,6 +10106,26 @@ server <- function(input, output, session) {
     validate(need(nzchar(path), "Choose a peak file from the current project."))
     safe_read_result_table(path, 10000)
   }, page_length = 50)
+  output$peak_annotation_file_ui <- renderUI({
+    progress_refresh()
+    choices <- peak_annotation_result_files(current_project())
+    if (!length(choices)) return(div(class = "empty-box", "No gene-annotation tables were found yet. Run Peak Annotation after peak calling or differential analysis."))
+    selectInput(
+      "peak_annotation_file", "Annotated peak file",
+      choices = choices,
+      selected = selected_choice(input$peak_annotation_file, choices, choices[[1]]),
+      selectize = FALSE
+    )
+  })
+  output$peak_annotation_summary <- render_csl_table({
+    progress_refresh()
+    peak_annotation_summary_table(current_project())
+  }, page_length = 50)
+  output$peak_annotation_table <- render_csl_table({
+    path <- validated_project_result_path(current_project(), input$peak_annotation_file)
+    validate(need(nzchar(path), "Choose an annotated peak file from the current project."))
+    safe_read_result_table(path, 10000)
+  }, page_length = 50, scroll_y = "600px")
   output$atac_peak_heatmap_ui <- renderUI({
     path <- validated_project_result_path(current_project(), input$atac_peak_file)
     if (!nzchar(path)) return(div(class = "empty-box", "Choose a peak file from the current project."))
