@@ -82,6 +82,12 @@ Example launcher output. The port in your terminal may differ if the default por
 - Embeds the native CodeSpringLab RNA-seq Results Explorer and provides organized ATAC-seq, CUT&RUN, and ChIP-seq explorers in the same app.
 - Records logs, methods, tool versions, reference genome selections, and run parameters.
 
+### ChIP-seq workflow
+
+ChIP-seq is a complete CodeSpringLab workflow in the app: Cutadapt and FastQC, single- or paired-end Bowtie2 alignment, duplicate-removed CPM bigWigs, matched-input MACS2 narrow or broad peaks, and target-only DiffBind/DESeq2 comparisons. Every ChIP target must identify an explicit `reference=input` sample through `control_sample`; input libraries are used during MACS2 and are not counted as DiffBind replicates.
+
+New ChIP-seq projects use the current references only: mouse GRCm39/GENCODE M39 or human GRCh38/GENCODE v50. The Results Explorer reports target/input roles, matched controls, alignment retention, MACS2 parameters and peak counts, and completed differential-binding comparisons.
+
 ## Preview
 
 ### Project Setup

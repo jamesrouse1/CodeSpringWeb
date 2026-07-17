@@ -31,6 +31,14 @@ chip_project <- list(
 )
 assert(identical(app_env$chip_control_sample_for(chip_project, "A1"), "I1"), "explicit ChIP control resolution")
 assert(nrow(app_env$chip_target_design(chip_project)) == 4L, "input rows excluded from ChIP targets")
+mouse_chip_ref <- app_env$chip_reference_resources(chip_project)
+human_chip_project <- chip_project
+human_chip_project$genome <- "human"
+human_chip_ref <- app_env$chip_reference_resources(human_chip_project)
+assert(identical(mouse_chip_ref$genome_version, "mouse_gencodeM39") && grepl("mouse_gencodeM39", mouse_chip_ref$bowtie2_index), "ChIP mouse reference uses GRCm39/GENCODE M39")
+assert(identical(human_chip_ref$genome_version, "human_gencode50") && grepl("human_gencode50", human_chip_ref$bowtie2_index), "ChIP human reference uses GRCh38/GENCODE v50")
+assert(length(app_env$genome_reference_choices("mouse", "ChIP-seq")) == 1L, "ChIP setup offers only the current mouse reference")
+assert(length(app_env$genome_reference_choices("human", "ChIP-seq")) == 1L, "ChIP setup offers only the current human reference")
 
 duplicate_design <- data.frame(
   include = TRUE, sample = c("sample-A", "sample A"), cell_type = "", condition = c("A", "B"),
@@ -101,6 +109,15 @@ unlink(marker)
 assert(identical(app_env$chip_macs2_peak_file(chip_project, "A1"), ""), "partial ChIP MACS2 output rejected")
 writeLines("status\tcomplete", marker)
 assert(identical(app_env$chip_macs2_peak_file(chip_project, "A1"), legacy_peak), "completed ChIP MACS2 peak accepted")
+chip_peaks <- app_env$chip_peak_summary_table(chip_project)
+assert(NROW(chip_peaks) == 4L && chip_peaks$status[chip_peaks$sample == "A1"] == "Completed", "ChIP matched-input peak summary reports completion")
+alignment_dir <- file.path(root, "bowtie2", "A1")
+dir.create(alignment_dir, recursive = TRUE)
+writeLines(c("sample\tA1", "mapped_reads\t100", "deduplicated_reads\t80", "bigwig_normalization\tCPM"), file.path(alignment_dir, "A1_alignment_summary.txt"))
+chip_alignment <- app_env$chip_alignment_summary_table(chip_project)
+assert(NROW(chip_alignment) == 1L && all(c("role", "condition", "matched_input") %in% names(chip_alignment)) && chip_alignment$matched_input[[1]] == "I1", "ChIP alignment summary includes experimental roles")
+assert(inherits(app_env$atac_summary_cards_ui(chip_project), "shiny.tag"), "ChIP summary cards render with fake results")
+assert(inherits(app_env$chip_results_explorer_ui(), "shiny.tag"), "ChIP Results Explorer UI renders locally")
 
 bad_q <- app_env$submit_atac_macs2_jobs(atac_project, "not-a-number", "A1")
 assert(grepl("q-value must be", bad_q), "invalid ATAC MACS2 q-value rejected before submission")

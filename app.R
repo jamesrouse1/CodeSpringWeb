@@ -3116,6 +3116,55 @@ atac_alignment_summary_table <- function(project) {
   rows <- Filter(Negate(is.null), rows); if (length(rows)) do.call(rbind, rows) else data.frame()
 }
 
+chip_alignment_summary_table <- function(project) {
+  alignment <- atac_alignment_summary_table(project)
+  if (!NROW(alignment)) return(alignment)
+  design <- chip_design(project)
+  idx <- match(as.character(alignment$sample), as.character(design$sample))
+  metadata <- data.frame(
+    role = ifelse(is.na(idx), "", as.character(design$reference[idx])),
+    condition = ifelse(is.na(idx), "", as.character(design$condition[idx])),
+    replicate = ifelse(is.na(idx), "", as.character(design$replicate[idx])),
+    matched_input = ifelse(is.na(idx), "", as.character(design$control_sample[idx])),
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  cbind(alignment["sample"], metadata, alignment[setdiff(names(alignment), "sample")])
+}
+
+chip_peak_summary_table <- function(project) {
+  design <- chip_target_design(project)
+  if (!NROW(design)) return(data.frame())
+  rows <- lapply(seq_len(NROW(design)), function(i) {
+    sample <- as.character(design$sample[[i]])
+    sample_dir <- file.path(project$data_dir, "macs2", sample)
+    marker <- file.path(sample_dir, paste0(sample, "_macs2_complete.txt"))
+    run_log <- file.path(sample_dir, paste0(sample, "_macs2.log"))
+    summary <- metric_file_to_named_list(file.path(sample_dir, paste0(sample, "_macs2_summary.txt")))
+    peak_file <- as.character(summary$peak_file %||% "")
+    if (!nzchar(peak_file)) {
+      candidates <- file.path(sample_dir, paste0(sample, c("_peaks.narrowPeak", "_peaks.broadPeak")))
+      candidates <- candidates[file.exists(candidates)]
+      if (length(candidates) == 1L) peak_file <- candidates[[1]]
+    }
+    status <- if (file.exists(marker) && file_size_for(marker) > 0) "Completed" else if (file.exists(run_log)) "Incomplete / failed" else "Not started"
+    data.frame(
+      sample = sample,
+      condition = as.character(design$condition[[i]] %||% ""),
+      replicate = as.character(design$replicate[[i]] %||% ""),
+      matched_input = chip_control_sample_for(project, sample),
+      status = status,
+      peak_type = as.character(summary$peak_type %||% if (grepl("broadPeak$", peak_file)) "broad" else if (nzchar(peak_file)) "narrow" else ""),
+      peak_count = as.character(summary$peak_count %||% ""),
+      qvalue = as.character(summary$qvalue %||% ""),
+      peak_file = peak_file,
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  })
+  do.call(rbind, rows)
+}
+
 atac_summary_cards_ui <- function(project) {
   design <- project_design_df(project)
   alignment <- atac_alignment_summary_table(project)
@@ -3128,6 +3177,18 @@ atac_summary_cards_ui <- function(project) {
   completed_postprocess <- atac_postprocess_status_table(project)
   completed_postprocess <- if (NROW(completed_postprocess)) sum(completed_postprocess$status == "Complete") else 0L
   assay <- if (is_chip_project(project)) "ChIP-seq" else "ATAC-seq"
+  if (is_chip_project(project)) {
+    chip <- chip_design(project)
+    peak_summary <- chip_peak_summary_table(project)
+    return(div(class = "cutrun-metric-grid",
+      cutrun_metric_card("ChIP targets", format_metric_value(sum(chip$reference == "chip", na.rm = TRUE)), "Target libraries", "blue"),
+      cutrun_metric_card("Matched inputs", format_metric_value(sum(chip$reference == "input", na.rm = TRUE)), "Input-control libraries", "green"),
+      cutrun_metric_card("Alignment summaries", format_metric_value(NROW(alignment)), "Target and input Bowtie2 outputs", "gold"),
+      cutrun_metric_card("Completed peak calls", format_metric_value(sum(peak_summary$status == "Completed")), "Matched-input MACS2", "purple"),
+      cutrun_metric_card("Reference", if (genome_species(project) == "mouse") "GRCm39 / M39" else "GRCh38 / v50", "Current ChIP-seq genome", "blue"),
+      cutrun_metric_card("Differential comparisons", format_metric_value(length(comparisons)), "Completed DiffBind folders", "green")
+    ))
+  }
   div(class = "cutrun-metric-grid",
     cutrun_metric_card("Samples", format_metric_value(NROW(design)), "Included in the saved design matrix", "blue"),
     cutrun_metric_card("Alignment summaries", format_metric_value(NROW(alignment)), paste(assay, "Bowtie2 outputs"), "green"),
@@ -3253,7 +3314,7 @@ chip_results_explorer_ui <- function() {
         tags$h4("Post-alignment output checks"),
         table_output("atac_postprocess_status")
       ),
-      tabPanel("Peaks", br(), sidebarLayout(
+      tabPanel("Peaks", br(), tags$h4("Matched-input peak-calling summary"), table_output("chip_peak_summary"), tags$hr(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_peak_file_ui"), tags$hr(), helpText("Inspect MACS2 ChIP-seq peak calls.")),
         mainPanel(width = 10, table_output("atac_peak_table"))
       )),
@@ -4245,11 +4306,15 @@ genome_reference_key <- function(project) {
   "mouse_gencodeM29"
 }
 
-genome_reference_choices <- function(species) {
+genome_reference_choices <- function(species, analysis = NULL) {
   catalog <- genome_reference_catalog()
   species <- tolower(species %||% "mouse")
   if (!species %in% names(catalog)) species <- "mouse"
   refs <- catalog[[species]]
+  if (analysis_key(analysis %||% "rna") %in% c("atac", "cutrun", "chip")) {
+    current <- if (identical(species, "human")) "human_gencode50" else "mouse_gencodeM39"
+    refs <- refs[current]
+  }
   stats::setNames(names(refs), vapply(refs, `[[`, character(1), "label"))
 }
 
@@ -4298,7 +4363,31 @@ atac_reference_resources <- function(project) {
 }
 
 chip_reference_resources <- function(project) {
-  atac_reference_resources(project)
+  if (identical(genome_species(project), "human")) {
+    list(
+      label = "Human GRCh38 / GENCODE v50 Bowtie2 ChIP-seq reference",
+      genome_version = "human_gencode50",
+      bowtie2_index = "/grid/bsr/data/data/utama/genome/human_gencode50/bowtie2_index/GRCh38_gencode50",
+      chrom_sizes = "/grid/bsr/data/data/utama/genome/human_gencode50/GRCh38.chrom.sizes",
+      gtf = "/grid/bsr/data/data/utama/genome/human_gencode50/gencode.v50.primary_assembly.annotation.gtf",
+      effective_genome_size = "2913022398",
+      macs2_genome = "2.7e+9",
+      homer_genome = "hg38",
+      blacklist = ""
+    )
+  } else {
+    list(
+      label = "Mouse GRCm39 / GENCODE M39 Bowtie2 ChIP-seq reference",
+      genome_version = "mouse_gencodeM39",
+      bowtie2_index = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/bowtie2_index/GRCm39_gencodeM39",
+      chrom_sizes = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/GRCm39.chrom.sizes",
+      gtf = "/grid/bsr/data/data/utama/genome/mouse_gencodeM39/gencode.vM39.primary_assembly.annotation.gtf",
+      effective_genome_size = "2654621783",
+      macs2_genome = "1.87e+9",
+      homer_genome = "mm39",
+      blacklist = file.path(SCRIPTS_DIR, "test", "manifest_atac", "mm39-blacklist.bed")
+    )
+  }
 }
 
 project_reference_label <- function(project) {
@@ -7900,7 +7989,7 @@ server <- function(input, output, session) {
 
   output$new_genome_version_ui <- renderUI({
     species <- tolower(input$new_species %||% "mouse")
-    choices <- genome_reference_choices(species)
+    choices <- genome_reference_choices(species, input$new_project_analysis %||% input$analysis %||% "RNA-seq")
     selected <- isolate(input$new_genome_version)
     if (is.null(selected) || !selected %in% unname(choices)) selected <- unname(choices)[[1]]
     selectInput("new_genome_version", "Genome/reference version", choices = choices, selected = selected, selectize = FALSE)
@@ -8401,6 +8490,8 @@ server <- function(input, output, session) {
         tool_panel("Bowtie2", status, "Align selected ChIP and input libraries, remove duplicates, and generate CPM bigWigs.", tagList(
           uiOutput("chip_bowtie2_samples_ui"),
           checkboxInput("chip_bowtie2_use_trimmed", "Use trimmed reads", value = trimmed_checkbox_default(p, isolate(input$chip_bowtie2_use_trimmed))),
+          tags$p(class = "muted small-note", chip_reference_resources(p)$label),
+          tags$p(class = "muted small-note status-path", chip_reference_resources(p)$bowtie2_index),
           tags$p(class = "muted small-note", "Run target and matched input libraries before MACS2. Temporary files remain in project storage, not shared compute-node /tmp.")
         ), "run_chip_bowtie2", "Submit Bowtie2"),
         tool_panel("MACS2 Peaks", status, "Call ChIP-seq peaks against each target's explicit matched input control.", tagList(
@@ -9143,7 +9234,9 @@ server <- function(input, output, session) {
     safe_refresh_progress_now("CUT&RUN results refresh")
   }, ignoreInit = TRUE)
   observeEvent(input$refresh_atac_results, {
-    if (is_atac_project(current_project())) safe_refresh_progress_now("ATAC-seq results refresh")
+    if (is_atac_project(current_project()) || is_chip_project(current_project())) {
+      safe_refresh_progress_now(if (is_chip_project(current_project())) "ChIP-seq results refresh" else "ATAC-seq results refresh")
+    }
   }, ignoreInit = TRUE)
 
   output$results_overview <- render_csl_table(project_status(current_project()), page_length = 20)
@@ -9190,7 +9283,10 @@ server <- function(input, output, session) {
     if (!isTRUE(current_project()$paired_end)) return(div(class = "empty-box", "This is a single-end project; there is no R2 report."))
     cutrun_qc_report_ui(current_project(), input$atac_qc_sample %||% "", "R2", "screen", isTRUE(input$atac_qc_show_trimmed))
   })
-  output$atac_alignment_summary <- render_csl_table(atac_alignment_summary_table(current_project()), page_length = 50)
+  output$atac_alignment_summary <- render_csl_table({
+    if (is_chip_project(current_project())) chip_alignment_summary_table(current_project()) else atac_alignment_summary_table(current_project())
+  }, page_length = 50)
+  output$chip_peak_summary <- render_csl_table(chip_peak_summary_table(current_project()), page_length = 50)
   output$atac_summary_cards <- renderUI({
     progress_refresh()
     atac_summary_cards_ui(current_project())
