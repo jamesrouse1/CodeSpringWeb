@@ -467,6 +467,24 @@ atac_comparisons <- app_env$genome_browser_comparison_catalog(atac_browser_proje
 expected_atac_track_order <- c("Treated1", "Treated2", "Treated3", "Control1", "Control2", "Control3")
 assert(NROW(atac_comparisons) == 1L && identical(atac_comparisons$samples[[1]], expected_atac_track_order), "existing ATAC comparisons place vehicle/control tracks below treatment tracks")
 
+for (scope in c("AKP", "AKPS")) {
+  scoped_manifest_dir <- file.path(atac_browser_root, "manifest", "atac_diffbind", paste0("cell_type_", scope), "condition")
+  dir.create(scoped_manifest_dir, recursive = TRUE, showWarnings = FALSE)
+  scoped_samples <- paste0(scope, "_", rep(c("AA", "Veh"), each = 2L), rep(1:2, 2L))
+  scoped_design <- data.frame(
+    sample = scoped_samples,
+    condition = rep(c("AA", "Veh"), each = 2L),
+    filename = paste0(scoped_samples, "_R1.fastq.gz"),
+    stringsAsFactors = FALSE
+  )
+  write.table(scoped_design, file.path(scoped_manifest_dir, "design_matrix.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
+}
+akps_comparison_dir <- file.path(atac_browser_root, "diffbind", "AKPS_AA_vs_AKPS_Veh")
+dir.create(akps_comparison_dir, recursive = TRUE, showWarnings = FALSE)
+writeLines("chr1\t300\t420\tpeak_akps\t4", file.path(akps_comparison_dir, "DifferentialPeaks_AA_vs_Veh_ref.with_stats.bed"))
+akps_manifest_sheet <- app_env$genome_browser_atac_manifest_sheet(atac_browser_project, akps_comparison_dir)
+assert(NROW(akps_manifest_sheet) == 4L && all(startsWith(akps_manifest_sheet$sample, "AKPS_")), "ATAC comparison scope matches AKPS exactly and never falls back to the AKP prefix")
+
 annotation_inputs <- app_env$peak_annotation_input_files(atac_project)
 assert(legacy_peak %in% annotation_inputs, "peak annotation discovers completed per-sample MACS2 peaks")
 annotation_root <- file.path(root, "peak_annotation")

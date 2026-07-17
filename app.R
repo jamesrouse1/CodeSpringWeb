@@ -3448,6 +3448,7 @@ genome_browser_atac_manifest_sheet <- function(project, result_dir) {
   labels <- genome_browser_diffbind_labels(result_dir)
   has_labels <- all(nzchar(unname(labels)))
   slug <- clean_name(basename(result_dir), "comparison")
+  slug_tokens <- unique(tolower(strsplit(slug, "_", fixed = TRUE)[[1]]))
   candidates <- list()
   for (path in files) {
     sheet <- safe_read_table(path)
@@ -3464,9 +3465,9 @@ genome_browser_atac_manifest_sheet <- function(project, result_dir) {
       ))
       if (!NROW(normalized)) next
       scope <- basename(dirname(dirname(path)))
-      tokens <- strsplit(clean_name(scope, "scope"), "_", fixed = TRUE)[[1]]
+      tokens <- tolower(strsplit(clean_name(scope, "scope"), "_", fixed = TRUE)[[1]])
       tokens <- tokens[nchar(tokens) >= 3L & !tokens %in% c("all", "samples", "cell", "type")]
-      scope_score <- sum(vapply(tokens, function(token) grepl(token, slug, fixed = TRUE), logical(1)))
+      scope_score <- sum(tokens %in% slug_tokens)
       candidates[[length(candidates) + 1L]] <- list(sheet = normalized, score = scope_score, n = NROW(normalized))
     }
   }
