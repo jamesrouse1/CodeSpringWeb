@@ -201,6 +201,10 @@ assert(NROW(chip_signal) == 1L && chip_signal$role[[1]] == "chip" && chip_signal
 igv_catalog <- app_env$genome_browser_track_catalog(chip_project)
 assert(NROW(igv_catalog) >= 2L && all(c("signal", "peaks") %in% igv_catalog$kind), "embedded genome browser catalogs signal and peak tracks")
 assert(identical(app_env$genome_browser_reference(chip_project), "mm39") && identical(app_env$genome_browser_reference(human_chip_project), "hg38"), "embedded genome browser follows the project reference")
+shared_scale_config <- app_env$genome_browser_signal_display_config(TRUE, TRUE)
+independent_scale_config <- app_env$genome_browser_signal_display_config(FALSE, TRUE)
+assert(identical(shared_scale_config$autoscaleGroup, "codespring_comparison_signal"), "comparison bigWigs share an IGV autoscale group")
+assert(is.null(independent_scale_config$autoscaleGroup), "manual genome-browser tracks retain independent autoscaling")
 range_response <- app_env$genome_browser_range_response(
   list(path = signal_file, content_type = "application/octet-stream"),
   list(REQUEST_METHOD = "GET", HTTP_RANGE = "bytes=10-19")

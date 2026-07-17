@@ -3596,6 +3596,12 @@ genome_browser_preferred_signal_rows <- function(project, catalog, samples, meta
   if (length(rows)) do.call(rbind, rows) else signal[0, , drop = FALSE]
 }
 
+genome_browser_signal_display_config <- function(comparison_mode = FALSE, shared_scale = TRUE) {
+  config <- list(type = "wig", autoscale = TRUE, height = 110L)
+  if (isTRUE(comparison_mode) && isTRUE(shared_scale)) config$autoscaleGroup <- "codespring_comparison_signal"
+  config
+}
+
 genome_browser_default_locus <- function(project) {
   if (identical(genome_species(project), "human")) "chr1:1,000,000-2,000,000" else "chr1:3,000,000-4,000,000"
 }
@@ -10463,6 +10469,10 @@ server <- function(input, output, session) {
           multiple = TRUE, options = list(maxItems = 12L, plugins = list("remove_button"))
         ),
         checkboxInput(
+          "genome_browser_shared_scale", "Use one y-axis scale for all signal tracks",
+          value = if (is.null(input$genome_browser_shared_scale)) TRUE else isTRUE(input$genome_browser_shared_scale)
+        ),
+        checkboxInput(
           "genome_browser_show_peaks", "Include individual sample peak calls",
           value = if (is.null(input$genome_browser_show_peaks)) FALSE else isTRUE(input$genome_browser_show_peaks)
         ),
@@ -10525,6 +10535,7 @@ server <- function(input, output, session) {
       if (NROW(comparisons)) "comparison" else "manual"
     )
     comparison_mode <- identical(browser_mode, "comparison") && NROW(comparisons)
+    shared_signal_scale <- comparison_mode && (if (is.null(input$genome_browser_shared_scale)) TRUE else isTRUE(input$genome_browser_shared_scale))
     comparison_label <- ""
     differential_loaded <- FALSE
     if (comparison_mode) {
@@ -10576,7 +10587,7 @@ server <- function(input, output, session) {
       color <- if (identical(row$kind[[1]], "differential")) "#6d28d9" else unname(sample_colors[[row$sample[[1]]]])
       base <- list(name = row$label[[1]], url = url, format = row$format[[1]], color = color)
       if (identical(row$kind[[1]], "signal")) {
-        c(base, list(type = "wig", autoscale = TRUE, height = 110L))
+        c(base, genome_browser_signal_display_config(comparison_mode, shared_signal_scale))
       } else if (identical(row$kind[[1]], "differential")) {
         c(base, list(type = "annotation", displayMode = "EXPANDED", indexed = FALSE, height = 120L))
       } else {
@@ -10591,6 +10602,7 @@ server <- function(input, output, session) {
       " using ", genome_browser_reference(p), ".",
       if (comparison_mode) paste0(
         " Comparison: ", comparison_label, ".",
+        if (shared_signal_scale) " Signal tracks share one y-axis scale." else "",
         if (differential_loaded) " Differential peaks are the bottom track." else ""
       ) else "",
       if (truncated) " Showing the first 32 matching tracks." else ""
