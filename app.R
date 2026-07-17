@@ -3229,6 +3229,145 @@ cutrun_signal_track_table <- function(project) {
   do.call(rbind, rows)
 }
 
+genome_browser_track_catalog <- function(project) {
+  signal_root <- file.path(project$data_dir, "bowtie2")
+  signal_files <- if (dir.exists(signal_root)) {
+    list.files(signal_root, pattern = "\\.(bw|bigwig)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+  } else character(0)
+  peak_roots <- if (is_cutrun_project(project)) {
+    file.path(project$data_dir, c("seacr", "macs2"))
+  } else {
+    file.path(project$data_dir, "macs2")
+  }
+  peak_files <- unlist(lapply(peak_roots[dir.exists(peak_roots)], function(root) {
+    list.files(root, pattern = "\\.(bed|narrowPeak|broadPeak)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
+  }), use.names = FALSE)
+  files <- unique(c(signal_files, peak_files))
+  files <- files[file.exists(files) & vapply(files, function(path) file_size_for(path) > 0, logical(1))]
+  if (!length(files)) return(data.frame())
+  samples <- project_samples(project)
+  rows <- lapply(sort(files), function(path) {
+    ext <- tolower(tools::file_ext(path))
+    sample <- result_file_sample(project, path, samples)
+    if (!nzchar(sample)) sample <- basename(dirname(path))
+    is_signal <- ext %in% c("bw", "bigwig")
+    format <- if (is_signal) "bigwig" else if (ext == "narrowpeak") "narrowPeak" else if (ext == "broadpeak") "broadPeak" else "bed"
+    normalization <- if (!is_signal) "" else if (grepl("spikein", basename(path), ignore.case = TRUE)) {
+      "spike-in"
+    } else if (grepl("cpm", basename(path), ignore.case = TRUE) || !is_cutrun_project(project)) {
+      "CPM"
+    } else if (grepl("raw", basename(path), ignore.case = TRUE)) {
+      "raw"
+    } else "signal"
+    run_name <- if (is_cutrun_project(project) && !is_signal) {
+      parts <- strsplit(normalizePath(path, winslash = "/", mustWork = FALSE), "/", fixed = TRUE)[[1]]
+      combo <- parts[grepl("^(norm|non)_(stringent|relaxed)$", parts)]
+      if (length(combo)) combo[[length(combo)]] else basename(dirname(dirname(path)))
+    } else ""
+    label <- if (is_signal) {
+      paste(sample, normalization, "signal", sep = " — ")
+    } else {
+      paste(c(sample, if (nzchar(run_name)) run_name, format, "peaks"), collapse = " — ")
+    }
+    data.frame(
+      sample = sample,
+      kind = if (is_signal) "signal" else "peaks",
+      format = format,
+      label = label,
+      path = normalizePath(path, winslash = "/", mustWork = TRUE),
+      stringsAsFactors = FALSE,
+      check.names = FALSE
+    )
+  })
+  catalog <- do.call(rbind, rows)
+  catalog$label <- make.unique(catalog$label, sep = " — ")
+  catalog
+}
+
+genome_browser_default_locus <- function(project) {
+  if (identical(genome_species(project), "human")) "chr1:1,000,000-2,000,000" else "chr1:3,000,000-4,000,000"
+}
+
+genome_browser_reference <- function(project) {
+  if (identical(genome_species(project), "human")) "hg38" else "mm39"
+}
+
+genome_browser_range_response <- function(data, req) {
+  path <- data$path %||% ""
+  if (!file.exists(path) || file_size_for(path) <= 0) {
+    return(shiny:::httpResponse(404, "text/plain", "Track file not found."))
+  }
+  size <- as.numeric(file.info(path)$size[[1]])
+  headers <- c(
+    `Accept-Ranges` = "bytes",
+    `Cache-Control` = "private, max-age=3600",
+    `Content-Disposition` = paste0("inline; filename=\"", gsub("[\"\\\\]", "_", basename(path)), "\"")
+  )
+  method <- toupper(req$REQUEST_METHOD %||% "GET")
+  range_header <- trimws(req$HTTP_RANGE %||% "")
+  if (!nzchar(range_header)) {
+    headers <- c(headers, `Content-Length` = format(size, scientific = FALSE, trim = TRUE))
+    content <- if (identical(method, "HEAD")) raw(0) else list(file = path, owned = FALSE)
+    return(shiny:::httpResponse(200, data$content_type, content, headers))
+  }
+  match <- regmatches(range_header, regexec("^bytes=([0-9]*)-([0-9]*)(?:,.*)?$", range_header, perl = TRUE))[[1]]
+  if (length(match) != 3L || (!nzchar(match[[2]]) && !nzchar(match[[3]]))) {
+    return(shiny:::httpResponse(416, "text/plain", "Invalid byte range.", c(`Content-Range` = paste0("bytes */", size))))
+  }
+  if (nzchar(match[[2]])) {
+    start <- suppressWarnings(as.numeric(match[[2]]))
+    end <- if (nzchar(match[[3]])) suppressWarnings(as.numeric(match[[3]])) else size - 1
+  } else {
+    suffix <- suppressWarnings(as.numeric(match[[3]]))
+    start <- max(0, size - suffix)
+    end <- size - 1
+  }
+  end <- min(end, size - 1)
+  if (!is.finite(start) || !is.finite(end) || start < 0 || start > end || start >= size) {
+    return(shiny:::httpResponse(416, "text/plain", "Requested byte range is unavailable.", c(`Content-Range` = paste0("bytes */", size))))
+  }
+  chunk_length <- as.integer(end - start + 1)
+  connection <- file(path, open = "rb")
+  on.exit(close(connection), add = TRUE)
+  seek(connection, where = start, origin = "start")
+  content <- if (identical(method, "HEAD")) raw(0) else readBin(connection, what = "raw", n = chunk_length)
+  headers <- c(
+    headers,
+    `Content-Range` = paste0("bytes ", format(start, scientific = FALSE), "-", format(end, scientific = FALSE), "/", format(size, scientific = FALSE)),
+    `Content-Length` = as.character(chunk_length)
+  )
+  shiny:::httpResponse(206, data$content_type, content, headers)
+}
+
+register_genome_browser_track <- function(session, project, path, index = 1L) {
+  path <- validated_project_result_path(project, path)
+  if (!nzchar(path)) stop("Genome-browser track is outside the selected project.")
+  ext <- tolower(tools::file_ext(path))
+  content_type <- if (ext %in% c("bw", "bigwig")) "application/octet-stream" else "text/plain; charset=utf-8"
+  key <- paste0("igv_", clean_name(basename(path), "track"), "_", index)
+  session$registerDataObj(key, list(path = path, content_type = content_type), genome_browser_range_response)
+}
+
+genome_browser_ui <- function() {
+  br()
+  sidebarLayout(
+    sidebarPanel(
+      width = 3,
+      uiOutput("genome_browser_controls_ui"),
+      textInput("genome_browser_locus", "Starting locus", value = "", placeholder = "Gene or chr:start-end"),
+      checkboxInput("genome_browser_show_peaks", "Include peak calls", value = TRUE),
+      actionButton("load_genome_browser", "Load selected tracks", class = "btn-primary"),
+      tags$hr(),
+      helpText("Select up to eight samples. The browser loads their bigWig signal and optional peak calls from this project only.")
+    ),
+    mainPanel(
+      width = 9,
+      div(id = "codespring_igv_status", class = "muted small-note", "Choose samples, then load the browser."),
+      div(id = "codespring_igv_browser", class = "codespring-igv-browser")
+    )
+  )
+}
+
 cutrun_files_by_category <- function(project, category = "all") {
   category <- category %||% "all"
   files <- switch(category,
@@ -3503,7 +3642,8 @@ atac_results_explorer_ui <- function() {
         tabPanel("Signal Tracks", br(),
           div(class = "cutrun-section-heading", tags$h4("Genome-browser tracks"), tags$p("Per-sample bigWig and bedGraph files with their saved normalization.")),
           table_output("atac_signal_tracks")
-        )
+        ),
+        tabPanel("Genome Browser", genome_browser_ui())
       )),
       tabPanel("Differential Accessibility", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
@@ -3548,7 +3688,8 @@ chip_results_explorer_ui <- function() {
         tabPanel("Signal Tracks", br(),
           div(class = "cutrun-section-heading", tags$h4("Genome-browser tracks"), tags$p("Target and input-control bigWig/bedGraph files with their saved normalization.")),
           table_output("atac_signal_tracks")
-        )
+        ),
+        tabPanel("Genome Browser", genome_browser_ui())
       )),
       tabPanel("Differential Binding", br(), sidebarLayout(
         sidebarPanel(width = 2, uiOutput("atac_diffbind_dir_ui"), tags$hr(), helpText("Each comparison is stored and displayed independently.")),
@@ -3772,6 +3913,7 @@ cutrun_results_explorer_ui <- function() {
                 div(class = "cutrun-section-heading", tags$h4("Genome-browser tracks"), tags$p("BigWig and bedGraph signals, including spike-in, CPM, or raw normalization.")),
                 table_output("cutrun_signal_tracks")
               ),
+              tabPanel("Genome Browser", genome_browser_ui()),
               tabPanel("Peak Counts",
                 br(),
                 tags$p(class = "muted small-note", "Project-wide union counts are intended for QC. Use Differential Binding for mark-specific statistical comparisons."),
@@ -7278,6 +7420,8 @@ body { background:#eef3f8; color:#17202f; }
 .cutrun-chart-card { background:white; border:1px solid #d8dde8; border-radius:10px; padding:14px 16px 8px 16px; margin:12px 0 18px 0; }
 .fragment-plot-frame { width:100%; height:680px; display:flex; align-items:center; justify-content:center; overflow:hidden; background:white; border:1px solid #d8dde8; border-radius:10px; padding:12px; }
 .native-results-host .fragment-plot-frame img { display:block; width:100% !important; height:100% !important; max-width:none !important; object-fit:contain !important; }
+.codespring-igv-browser { width:100%; min-height:680px; background:white; border:1px solid #d8dde8; border-radius:10px; padding:8px; overflow:hidden; }
+#codespring_igv_status { margin:0 0 10px 2px; }
 .read-source-note { background:#f5f9ff; border-left:4px solid #2f6fed; border-radius:6px; padding:10px 12px; margin:8px 0 12px 0; color:#48627d; }
 .cutrun-results-host { overflow:visible !important; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
 .cutrun-results-shell { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.9); border-radius:10px !important; box-shadow:none; overflow:hidden; }
@@ -7883,6 +8027,7 @@ ui <- fluidPage(
   tags$head(
     tags$title("CodeSpringApp"),
     tags$style(HTML(app_css)),
+    tags$script(src = "https://cdn.jsdelivr.net/npm/igv@3.0.2/dist/igv.min.js"),
     tags$script(HTML("
       function cslFormatElapsed(total) {
         total = Math.max(0, Math.floor(total || 0));
@@ -7917,6 +8062,50 @@ ui <- fluidPage(
             }
             $(window).trigger('resize');
           }, 100);
+        }
+        if (label === 'Genome Browser') {
+          window.setTimeout(function() {
+            if (window.Shiny) {
+              Shiny.setInputValue('genome_browser_ready', Date.now(), {priority: 'event'});
+            }
+          }, 150);
+        }
+      });
+      function cslLoadGenomeBrowser(message, attempt) {
+        attempt = attempt || 0;
+        var container = document.getElementById(message.elementId || 'codespring_igv_browser');
+        var status = document.getElementById('codespring_igv_status');
+        if (!container) return;
+        if (!window.igv) {
+          if (attempt < 50) {
+            window.setTimeout(function() { cslLoadGenomeBrowser(message, attempt + 1); }, 100);
+          } else if (status) {
+            status.textContent = 'The genome-browser library could not be loaded. Check the laptop internet connection and reload this page.';
+          }
+          return;
+        }
+        if (status) status.textContent = 'Loading genome tracks…';
+        var create = function() {
+          container.innerHTML = '';
+          return window.igv.createBrowser(container, message.config).then(function(browser) {
+            window.codespringIgvBrowser = browser;
+            if (status) status.textContent = message.summary || 'Genome browser loaded.';
+            window.setTimeout(function() { $(window).trigger('resize'); }, 100);
+          });
+        };
+        var previous = window.codespringIgvBrowser;
+        var removal = previous ? Promise.resolve(window.igv.removeBrowser(previous)) : Promise.resolve();
+        removal.then(create).catch(function(error) {
+          container.innerHTML = '';
+          if (status) status.textContent = 'Genome browser error: ' + (error && error.message ? error.message : String(error));
+        });
+      }
+      $(document).on('shiny:connected', function() {
+        if (window.Shiny && Shiny.addCustomMessageHandler && !window.codespringIgvHandlerRegistered) {
+          window.codespringIgvHandlerRegistered = true;
+          Shiny.addCustomMessageHandler('codespring-igv-load', function(message) {
+            cslLoadGenomeBrowser(message, 0);
+          });
         }
       });
     "))
@@ -9775,6 +9964,79 @@ server <- function(input, output, session) {
     progress_refresh()
     peak_signal_track_table(current_project())
   }, page_length = 50, scroll_y = "600px")
+  output$genome_browser_controls_ui <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
+    progress_refresh()
+    p <- current_project()
+    catalog <- genome_browser_track_catalog(p)
+    if (!NROW(catalog)) return(div(class = "empty-box", "No bigWig signal or peak files are available yet."))
+    samples <- unique(as.character(catalog$sample))
+    design_order <- project_samples(p)
+    samples <- unique(c(design_order[design_order %in% samples], sort(setdiff(samples, design_order))))
+    selected <- intersect(as.character(input$genome_browser_samples %||% character(0)), samples)
+    if (!length(selected)) selected <- utils::head(samples, 2L)
+    selectizeInput(
+      "genome_browser_samples", "Samples", choices = samples, selected = selected,
+      multiple = TRUE, options = list(maxItems = 8L, plugins = list("remove_button"))
+    )
+  })
+  send_genome_browser <- function() {
+    p <- current_project()
+    if (!is_atac_project(p) && !is_chip_project(p) && !is_cutrun_project(p)) return(invisible(NULL))
+    catalog <- genome_browser_track_catalog(p)
+    if (!NROW(catalog)) {
+      session$sendCustomMessage("codespring-igv-load", list(
+        elementId = "codespring_igv_browser",
+        config = list(genome = genome_browser_reference(p), locus = genome_browser_default_locus(p), tracks = list()),
+        summary = "No bigWig signal or peak files are available for this project yet."
+      ))
+      return(invisible(NULL))
+    }
+    selected_samples <- intersect(as.character(input$genome_browser_samples %||% character(0)), unique(catalog$sample))
+    if (!length(selected_samples)) selected_samples <- utils::head(unique(catalog$sample), 2L)
+    tracks <- catalog[catalog$sample %in% selected_samples, , drop = FALSE]
+    if (!isTRUE(input$genome_browser_show_peaks)) tracks <- tracks[tracks$kind == "signal", , drop = FALSE]
+    tracks <- tracks[order(match(tracks$sample, selected_samples), match(tracks$kind, c("signal", "peaks")), tracks$label), , drop = FALSE]
+    truncated <- NROW(tracks) > 32L
+    if (truncated) tracks <- utils::head(tracks, 32L)
+    palette <- c("#2563eb", "#dc2626", "#059669", "#7c3aed", "#d97706", "#0891b2", "#be185d", "#4d7c0f")
+    sample_colors <- stats::setNames(rep(palette, length.out = length(selected_samples)), selected_samples)
+    configs <- lapply(seq_len(NROW(tracks)), function(i) {
+      row <- tracks[i, , drop = FALSE]
+      url <- register_genome_browser_track(session, p, row$path[[1]], i)
+      base <- list(name = row$label[[1]], url = url, format = row$format[[1]], color = unname(sample_colors[[row$sample[[1]]]]))
+      if (identical(row$kind[[1]], "signal")) {
+        c(base, list(type = "wig", autoscale = TRUE, height = 110L))
+      } else {
+        c(base, list(type = "annotation", displayMode = "EXPANDED", indexed = FALSE, height = 90L))
+      }
+    })
+    locus <- trimws(input$genome_browser_locus %||% "")
+    if (!nzchar(locus)) locus <- genome_browser_default_locus(p)
+    summary <- paste0(
+      "Loaded ", length(configs), " track", if (length(configs) == 1L) "" else "s",
+      " for ", length(unique(tracks$sample)), " sample", if (length(unique(tracks$sample)) == 1L) "" else "s",
+      " using ", genome_browser_reference(p), ".",
+      if (truncated) " Showing the first 32 matching tracks." else ""
+    )
+    session$sendCustomMessage("codespring-igv-load", list(
+      elementId = "codespring_igv_browser",
+      config = list(
+        genome = genome_browser_reference(p),
+        locus = locus,
+        loadDefaultGenomes = TRUE,
+        showNavigation = TRUE,
+        showIdeogram = TRUE,
+        showRuler = TRUE,
+        showSVGButton = TRUE,
+        tracks = configs
+      ),
+      summary = summary
+    ))
+    invisible(NULL)
+  }
+  observeEvent(input$load_genome_browser, send_genome_browser(), ignoreInit = TRUE)
+  observeEvent(input$genome_browser_ready, send_genome_browser(), ignoreInit = TRUE)
   output$atac_diffbind_dir_ui <- renderUI({
     progress_refresh(); root <- file.path(current_project()$data_dir, "diffbind"); dirs <- if (dir.exists(root)) list.dirs(root, recursive = FALSE, full.names = TRUE) else character(0); dirs <- dirs[vapply(dirs, diffbind_comparison_complete, logical(1))]
     if (!length(dirs)) return(div(class = "empty-box", "No DiffBind comparison found yet.")); selectInput("atac_diffbind_dir", "Comparison", choices = stats::setNames(dirs, basename(dirs)), selected = selected_choice(input$atac_diffbind_dir, dirs, dirs[[1]]), selectize = FALSE)

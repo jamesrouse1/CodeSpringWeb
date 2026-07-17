@@ -87,6 +87,7 @@ Example launcher output. The port in your terminal may differ if the default por
 - Sorts numeric-looking table values numerically, including comma-formatted counts, percentages, elapsed times, and human-readable file sizes such as KB/MB/GB.
 - Filters CUT&RUN result files by category and sample before choosing an individual file.
 - Keeps every result-file view scoped to the currently selected project, including after switching between projects, and reports bigWig/bedGraph normalization in the ATAC-seq, CUT&RUN, and ChIP-seq signal-track views.
+- Embeds an IGV genome browser in the ATAC-seq, CUT&RUN, and ChIP-seq Results Explorers. Users can compare up to eight samples, search by gene or genomic locus, and overlay project bigWig signal with optional BED, narrowPeak, or broadPeak calls. Track data are served through session-scoped, byte-range-aware URLs rather than exposing project directories.
 - Records logs, methods, tool versions, reference genome selections, and run parameters.
 
 ### ChIP-seq workflow

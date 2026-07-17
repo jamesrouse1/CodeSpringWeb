@@ -177,7 +177,7 @@ alignment_dir <- file.path(root, "bowtie2", "A1")
 dir.create(alignment_dir, recursive = TRUE, showWarnings = FALSE)
 writeLines(c("sample\tA1", "mapped_reads\t100", "deduplicated_reads\t80", "bigwig_normalization\tCPM"), file.path(alignment_dir, "A1_alignment_summary.txt"))
 signal_file <- file.path(alignment_dir, "A1Aligned.sortedByCoord_removeDup.out.bw")
-writeLines("fake bigWig", signal_file)
+writeBin(as.raw(seq_len(64)), signal_file)
 fragment_pdf <- file.path(alignment_dir, "A1_insert_size_histogram.pdf")
 grDevices::pdf(fragment_pdf, width = 8, height = 5)
 graphics::plot(1:10, type = "h", main = "Synthetic insert sizes")
@@ -189,6 +189,19 @@ chip_alignment <- app_env$chip_alignment_summary_table(chip_project)
 assert(NROW(chip_alignment) == 1L && all(c("role", "condition", "matched_input") %in% names(chip_alignment)) && chip_alignment$matched_input[[1]] == "I1", "ChIP alignment summary includes experimental roles")
 chip_signal <- app_env$peak_signal_track_table(chip_project)
 assert(NROW(chip_signal) == 1L && chip_signal$role[[1]] == "chip" && chip_signal$normalization[[1]] == "CPM", "ChIP signal table reports role and saved normalization")
+igv_catalog <- app_env$genome_browser_track_catalog(chip_project)
+assert(NROW(igv_catalog) >= 2L && all(c("signal", "peaks") %in% igv_catalog$kind), "embedded genome browser catalogs signal and peak tracks")
+assert(identical(app_env$genome_browser_reference(chip_project), "mm39") && identical(app_env$genome_browser_reference(human_chip_project), "hg38"), "embedded genome browser follows the project reference")
+range_response <- app_env$genome_browser_range_response(
+  list(path = signal_file, content_type = "application/octet-stream"),
+  list(REQUEST_METHOD = "GET", HTTP_RANGE = "bytes=10-19")
+)
+assert(identical(range_response$status, 206) && length(range_response$content) == 10L, "genome browser serves bounded byte ranges for large tracks")
+invalid_range <- app_env$genome_browser_range_response(
+  list(path = signal_file, content_type = "application/octet-stream"),
+  list(REQUEST_METHOD = "GET", HTTP_RANGE = "bytes=999-1000")
+)
+assert(identical(invalid_range$status, 416), "genome browser rejects out-of-range project track requests")
 fake_file_choices <- stats::setNames(c(signal_file, file.path(root, "bowtie2", "B1", "B1_signal.bw")), c("A1 signal", "B1 signal"))
 assert(identical(app_env$result_file_sample(chip_project, signal_file), "A1"), "result files resolve to their design sample")
 assert(identical(unname(app_env$filter_result_files_by_sample(chip_project, fake_file_choices, "A1")), signal_file), "sample file filter excludes other samples")
@@ -213,6 +226,7 @@ for (ui_check in list(
 }
 assert(grepl("Initial QC", chip_ui_text, fixed = TRUE) && grepl("Fragment Size", chip_ui_text, fixed = TRUE), "ChIP Results Explorer includes RNA-style QC navigation")
 assert(grepl("Signal Tracks", atac_ui_text, fixed = TRUE) && grepl("Signal Tracks", chip_ui_text, fixed = TRUE), "ATAC and ChIP Results Explorers expose signal-track navigation")
+assert(all(vapply(list(atac_ui_text, chip_ui_text, cutrun_ui_text), grepl, logical(1), pattern = "Genome Browser", fixed = TRUE)), "ATAC, ChIP, and CUT&RUN Results Explorers expose the embedded genome browser")
 assert(grepl("cutrun_file_sample_ui", cutrun_ui_text, fixed = TRUE), "CUT&RUN file explorer exposes a sample selector")
 assert(grepl("height:680px", app_env$app_css, fixed = TRUE), "fragment plots share a fixed display height")
 
