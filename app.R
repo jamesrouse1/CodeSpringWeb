@@ -891,9 +891,14 @@ read_key_value_table <- function(path, key_name = "Metric", value_name = "Value"
   out
 }
 
+peak_id_columns <- function(x) {
+  if (is.null(x) || !NCOL(x)) return(character(0))
+  names(x)[grepl("^PeakID(?:[[:space:](]|$)|^(name|V4)$", names(x), ignore.case = TRUE, perl = TRUE)]
+}
+
 expand_peakid_stats_table <- function(x) {
   if (!NROW(x) || !NCOL(x)) return(x)
-  peak_columns <- names(x)[grepl("^PeakID(?:[[:space:](]|$)|^(name|V4)$", names(x), ignore.case = TRUE, perl = TRUE)]
+  peak_columns <- peak_id_columns(x)
   if (!length(peak_columns)) return(x)
   peak_column <- peak_columns[[1]]
   ids <- as.character(x[[peak_column]])
@@ -3542,7 +3547,7 @@ differential_accessibility_result_table <- function(result_dir, n = 20000) {
     result <- safe_read_table(raw_files[[1]], n)
   }
   if (!NROW(result)) return(result)
-  peak_id_col <- names(result)[gsub("[^a-z0-9]+", "", tolower(names(result))) %in% c("peakid", "peak")]
+  peak_id_col <- peak_id_columns(result)
   interval <- rep(NA_character_, NROW(result))
   if (length(peak_id_col)) {
     candidate <- sub("\\|.*$", "", trimws(as.character(result[[peak_id_col[[1]]]])))
@@ -3609,9 +3614,9 @@ genome_browser_comparison_navigation <- function(result_dir, project = NULL, max
     gene_columns <- names(annotation)[gsub("[^a-z0-9]+", "", tolower(names(annotation))) %in% c("genename", "genesymbol", "symbol")]
     if (length(gene_columns) && NROW(annotation)) {
       annotation_genes <- trimws(as.character(annotation[[gene_columns[[1]]]]))
-      peak_id_columns <- names(annotation)[gsub("[^a-z0-9]+", "", tolower(names(annotation))) %in% c("peakid", "peak")]
-      if (length(peak_id_columns)) {
-        annotation_intervals <- sub("\\|.*$", "", trimws(as.character(annotation[[peak_id_columns[[1]]]])))
+      annotation_peak_id_columns <- peak_id_columns(annotation)
+      if (length(annotation_peak_id_columns)) {
+        annotation_intervals <- sub("\\|.*$", "", trimws(as.character(annotation[[annotation_peak_id_columns[[1]]]])))
         valid_context <- grepl("^[^:[:space:]]+:[0-9]+-[0-9]+$", annotation_intervals) &
           nzchar(annotation_genes) & !is.na(annotation_genes) &
           !tolower(annotation_genes) %in% c("na", "nan", "none", "intergenic", ".", "-")

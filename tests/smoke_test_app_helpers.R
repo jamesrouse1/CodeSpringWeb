@@ -370,7 +370,7 @@ expanded_bed <- app_env$safe_read_result_table(differential_bed)
 assert(all(c("Fold", "p.value", "FDR") %in% names(expanded_bed)), "ATAC with-stats BED exposes p-value and FDR columns in the Results Explorer")
 comparison_annotation <- file.path(comparison_dir, "DifferentialPeaks_B_vs_A_ref_annotated_with_stats.txt")
 writeLines(c(
-  "PeakID\tGene Name\tAnnotation\tDetailed Annotation\tDistance to TSS\tGene Description",
+  "PeakID (cmd=annotatePeaks.pl synthetic.with_stats.bed mm39)\tGene Name\tAnnotation\tDetailed Annotation\tDistance to TSS\tGene Description",
   "chr1:101-220|Fold=2.5|p.value=0.0002|FDR=0.004\tGeneA\tPromoter\tpromoter-TSS\t15\tSynthetic gene A",
   "chr1:501-650|Fold=-1.8|p.value=0.003|FDR=0.02\tGeneB\tIntron\tintron (GeneB)\t850\tSynthetic gene B"
 ), comparison_annotation)
