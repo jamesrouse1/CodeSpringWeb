@@ -58,11 +58,12 @@ for (project_variant in list(
 }
 for (project_variant in list(
   within(chip_project, { analysis_key <- "cutrun"; analysis <- "CUT&RUN" }),
-  within(chip_project, { analysis_key <- "atac"; analysis <- "ATAC-seq" }),
   chip_project
 )) {
   assert(identical(tail(app_env$pipeline_order(project_variant), 1), "Peak Annotation"), paste(project_variant$analysis, "ends with Peak Annotation"))
 }
+atac_project_variant <- within(chip_project, { analysis_key <- "atac"; analysis <- "ATAC-seq" })
+assert(identical(tail(app_env$pipeline_order(atac_project_variant), 1), "Differential Peaks"), "ATAC annotation runs inside MACS2 and DiffBind rather than as a final step")
 assert(identical(app_env$canonical_job_step("peak_annotation"), "Peak Annotation"), "peak annotation job labels canonicalize")
 assert(identical(app_env$step_data_paths(chip_project, "Peak Annotation"), file.path(root, "peak_annotation")), "peak annotation cleanup is confined to its project folder")
 
