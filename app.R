@@ -2,6 +2,7 @@ library(shiny)
 
 DT_AVAILABLE <- requireNamespace("DT", quietly = TRUE)
 BASE64_AVAILABLE <- requireNamespace("base64enc", quietly = TRUE)
+PDF_PREVIEW_CACHE <- new.env(parent = emptyenv())
 
 table_output <- function(output_id) {
   if (DT_AVAILABLE) DT::dataTableOutput(output_id) else tableOutput(output_id)
@@ -25,6 +26,71 @@ pvalue_render_js <- function(digits = 3) {
   ))
 }
 
+numeric_sort_kind <- function(x) {
+  if (is.numeric(x) || is.integer(x)) return("numeric")
+  values <- trimws(as.character(x %||% character(0)))
+  values <- values[!is.na(values) & nzchar(values) & !tolower(values) %in% c("na", "nan", "-", "—")]
+  if (!length(values)) return("")
+  number <- "[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+  if (all(grepl(paste0("^", number, "[[:space:]]*(?:B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$"), values, ignore.case = TRUE, perl = TRUE))) return("bytes")
+  if (all(grepl("^(?:[0-9]+-)?[0-9]+:[0-9]{2}:[0-9]{2}$", values, perl = TRUE))) return("duration")
+  if (all(grepl(paste0("^", number, "[[:space:]]*%$"), gsub(",", "", values), perl = TRUE))) return("percent")
+  parsed <- suppressWarnings(as.numeric(gsub(",", "", values)))
+  if (length(parsed) && all(is.finite(parsed))) "numeric" else ""
+}
+
+smart_numeric_render_js <- function(kind = "numeric", pvalue = FALSE, digits = 3) {
+  code <- sprintf(
+    "function(data, type, row, meta) {
+       var kind = '%s';
+       function parseValue(value) {
+         var text = value === null || value === undefined ? '' : String(value);
+         text = text.replace(/<[^>]*>/g, '').trim();
+         if (!text || text === '-' || text === '—' || /^(NA|NaN)$/i.test(text)) return null;
+         if (kind === 'bytes') {
+           var match = text.replace(/,/g, '').match(/^([+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?)\\s*(B|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$/i);
+           if (!match) return null;
+           var unit = match[2].toUpperCase();
+           var powers = {B:0, KB:1, KIB:1, MB:2, MIB:2, GB:3, GIB:3, TB:4, TIB:4};
+           return parseFloat(match[1]) * Math.pow(1024, powers[unit]);
+         }
+         if (kind === 'duration') {
+           var duration = text.match(/^(?:([0-9]+)-)?([0-9]+):([0-9]{2}):([0-9]{2})$/);
+           if (!duration) return null;
+           return (parseInt(duration[1] || '0', 10) * 86400) + (parseInt(duration[2], 10) * 3600) + (parseInt(duration[3], 10) * 60) + parseInt(duration[4], 10);
+         }
+         var number = parseFloat(text.replace(/,/g, '').replace(/%%$/, ''));
+         return isFinite(number) ? number : null;
+       }
+       var parsed = parseValue(data);
+       if (type === 'sort' || type === 'type') return parsed;
+       if (%s && (type === 'display' || type === 'filter') && parsed !== null) return parsed.toExponential(%d);
+       return data;
+     }",
+    kind,
+    if (isTRUE(pvalue)) "true" else "false",
+    digits
+  )
+  if (DT_AVAILABLE) DT::JS(code) else code
+}
+
+smart_table_column_defs <- function(df, default_width = "118px") {
+  defs <- list(list(width = default_width, targets = "_all"))
+  if (is.null(df) || !NCOL(df)) return(defs)
+  pvalue_cols <- pvalue_columns(df)
+  for (index in seq_len(NCOL(df))) {
+    column <- df[[index]]
+    kind <- numeric_sort_kind(column)
+    pvalue <- names(df)[[index]] %in% pvalue_cols
+    if (is.character(column) && nzchar(kind)) {
+      defs[[length(defs) + 1L]] <- list(targets = index - 1L, type = "num", render = smart_numeric_render_js(kind, pvalue))
+    } else if (pvalue) {
+      defs[[length(defs) + 1L]] <- list(targets = index - 1L, render = pvalue_render_js(3))
+    }
+  }
+  defs
+}
+
 format_pvalues_for_display <- function(df, digits = 3) {
   for (column in pvalue_columns(df)) {
     values <- suppressWarnings(as.numeric(df[[column]]))
@@ -42,12 +108,7 @@ render_csl_table <- function(expr, page_length = 50, editable = FALSE, scroll_y 
       df <- eval(expr_call, envir = expr_env)
       if (!NROW(df)) df <- data.frame()
       pvalue_cols_all <- pvalue_columns(df)
-      pvalue_targets <- match(pvalue_cols_all, names(df), nomatch = 0) - 1
-      pvalue_targets <- pvalue_targets[pvalue_targets >= 0]
-      column_defs <- c(
-        list(list(width = "118px", targets = "_all")),
-        lapply(pvalue_targets, function(target) list(targets = target, render = pvalue_render_js(3)))
-      )
+      column_defs <- smart_table_column_defs(df)
       widget <- DT::datatable(
         df,
         editable = editable,
@@ -100,6 +161,8 @@ render_methods_table <- function(expr, page_length = 25, scroll_y = "520px") {
       column_defs <- lapply(seq_len(min(NCOL(df), length(widths))), function(i) {
         list(width = widths[[i]], targets = i - 1)
       })
+      smart_defs <- smart_table_column_defs(df)
+      if (length(smart_defs) > 1L) column_defs <- c(column_defs, smart_defs[-1L])
       DT::datatable(
         df,
         rownames = FALSE,
@@ -3128,7 +3191,14 @@ cutrun_diffbind_result_dirs <- function(project) {
 cutrun_fragment_plot_files <- function(project) {
   root <- file.path(project$data_dir, "bowtie2")
   if (!dir.exists(root)) return(character(0))
-  sort(list.files(root, pattern = "_insert_size_histogram\\.(jpg|jpeg|png|pdf)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE))
+  files <- sort(list.files(root, pattern = "_insert_size_histogram\\.(jpg|jpeg|png|pdf)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE))
+  if (!length(files)) return(files)
+  preference <- match(tolower(tools::file_ext(files)), c("png", "jpg", "jpeg", "pdf"), nomatch = 99L)
+  samples <- basename(dirname(files))
+  order_index <- order(samples, preference, files)
+  files <- files[order_index]
+  samples <- samples[order_index]
+  unname(files[!duplicated(samples)])
 }
 
 human_file_size <- function(path) {
@@ -3172,6 +3242,38 @@ cutrun_files_by_category <- function(project, category = "all") {
   files <- unname(files)
   files <- sort(unique(files[file.exists(files)]))
   stats::setNames(files, relative_result_labels(project, files))
+}
+
+result_file_sample <- function(project, path, samples = NULL) {
+  if (is.null(samples)) samples <- project_samples(project)
+  samples <- unique(trimws(as.character(samples %||% character(0))))
+  samples <- samples[nzchar(samples) & !is.na(samples)]
+  if (!length(samples) || !nzchar(path %||% "")) return("")
+  path_parts <- strsplit(normalizePath(path, winslash = "/", mustWork = FALSE), "/", fixed = TRUE)[[1]]
+  exact <- samples[samples %in% path_parts]
+  if (length(exact)) return(exact[[which.max(nchar(exact))]])
+  file_key <- gsub("[^a-z0-9]+", "", tolower(basename(path)))
+  sample_keys <- gsub("[^a-z0-9]+", "", tolower(samples))
+  hits <- nzchar(sample_keys) & startsWith(file_key, sample_keys)
+  if (!any(hits)) return("")
+  candidates <- samples[hits]
+  candidates[[which.max(nchar(candidates))]]
+}
+
+cutrun_file_sample_choices <- function(project, files) {
+  paths <- unname(as.character(files %||% character(0)))
+  samples <- project_samples(project)
+  matched <- if (length(paths)) vapply(paths, function(path) result_file_sample(project, path, samples), character(1)) else character(0)
+  available <- sort(unique(matched[nzchar(matched)]))
+  c("All samples / project-level files" = "__all__", stats::setNames(available, available))
+}
+
+filter_result_files_by_sample <- function(project, files, sample = "__all__") {
+  sample <- trimws(as.character(sample %||% "__all__"))
+  if (!length(files) || !nzchar(sample) || identical(sample, "__all__")) return(files)
+  paths <- unname(files)
+  keep <- vapply(paths, function(path) identical(result_file_sample(project, path), sample), logical(1))
+  files[keep]
 }
 
 atac_alignment_summary_table <- function(project) {
@@ -3726,6 +3828,7 @@ cutrun_results_explorer_ui <- function() {
               sidebarPanel(
                 width = 3,
                 selectInput("cutrun_file_category", "Category", choices = c("QC reports" = "qc", "Alignment" = "alignment", "Signal tracks" = "signal", "Peaks" = "peaks", "Differential binding" = "differential", "All files" = "all"), selected = "qc", selectize = FALSE),
+                uiOutput("cutrun_file_sample_ui"),
                 uiOutput("cutrun_file_ui"),
                 tags$hr(),
                 uiOutput("cutrun_file_metadata_ui")
@@ -3902,12 +4005,10 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       slurm_complete <- slurm_state %in% completed_job_states
       slurm_cancelled <- slurm_state %in% cancelled_job_states
       slurm_failed <- slurm_state %in% failed_job_states
+      validated_legacy_atac_macs <- complete_outputs && is_atac_project(project) && identical(step, "MACS2 Peaks") &&
+        any(grepl("_peaks\\.narrowPeak$", targets, ignore.case = TRUE))
       status <- if (deleted_outputs) {
         deleted_status
-      } else if (slurm_cancelled) {
-        "Cancelled"
-      } else if (slurm_failed) {
-        "Likely failed"
       } else if (slurm_running) {
         "Running"
       } else if (slurm_waiting) {
@@ -3916,6 +4017,12 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
         "Running"
       } else if (active) {
         if (slurm_running) "Running" else "Waiting"
+      } else if (validated_legacy_atac_macs) {
+        "Completed"
+      } else if (slurm_cancelled) {
+        "Cancelled"
+      } else if (slurm_failed) {
+        "Likely failed"
       } else if (complete_outputs) {
         "Completed"
       } else if (slurm_complete) {
@@ -3925,7 +4032,11 @@ sample_progress <- function(project, active_states = active_job_state_map(projec
       } else {
         "Not started"
       }
-      note <- if (identical(status, "Likely failed") && fatal_error_signal) {
+      note <- if (identical(status, "Completed") && slurm_failed) {
+        "A previous validated output is complete; the most recent retry failed without invalidating that result."
+      } else if (identical(status, "Completed") && slurm_cancelled) {
+        "A previous validated output is complete; the most recent retry was cancelled without invalidating that result."
+      } else if (identical(status, "Likely failed") && fatal_error_signal) {
         "MACS reported an internal peak-calling exception; partial peak files are not accepted as complete."
       } else if (identical(status, "Likely failed") && slurm_complete && !complete_outputs) {
         "SLURM completed, but the expected output is missing or too small."
@@ -7089,6 +7200,59 @@ image_or_file_ui <- function(path, height = "900px") {
   }
 }
 
+pdf_first_page_data_uri <- function(path, dpi = 180) {
+  if (!BASE64_AVAILABLE || !file.exists(path) || tolower(tools::file_ext(path)) != "pdf") return("")
+  info <- file.info(path)
+  cache_key <- paste(normalizePath(path, winslash = "/", mustWork = TRUE), info$size[[1]], as.numeric(info$mtime[[1]]), as.integer(dpi), sep = "|")
+  if (exists(cache_key, envir = PDF_PREVIEW_CACHE, inherits = FALSE)) return(get(cache_key, envir = PDF_PREVIEW_CACHE, inherits = FALSE))
+  work <- tempfile("codespring-pdf-render-")
+  dir.create(work, recursive = TRUE, showWarnings = FALSE)
+  on.exit(unlink(work, recursive = TRUE, force = TRUE), add = TRUE)
+  prefix <- file.path(work, "page")
+  png <- paste0(prefix, ".png")
+  converter <- Sys.which("pdftoppm")
+  if (nzchar(converter)) {
+    tryCatch(
+      suppressWarnings(system2(converter, c("-f", "1", "-l", "1", "-png", "-singlefile", "-r", as.character(as.integer(dpi)), shQuote(path), shQuote(prefix)), stdout = FALSE, stderr = FALSE)),
+      error = function(e) NULL
+    )
+  }
+  if (!file.exists(png) && requireNamespace("magick", quietly = TRUE)) {
+    tryCatch({
+      image <- magick::image_read_pdf(path, density = as.integer(dpi))
+      magick::image_write(image[1], path = png, format = "png")
+    }, error = function(e) NULL)
+  }
+  if (!file.exists(png) || file_size_for(png) <= 0) return("")
+  uri <- paste0("data:image/png;base64,", base64enc::base64encode(png))
+  if (length(ls(PDF_PREVIEW_CACHE, all.names = TRUE)) >= 100L) rm(list = ls(PDF_PREVIEW_CACHE, all.names = TRUE), envir = PDF_PREVIEW_CACHE)
+  assign(cache_key, uri, envir = PDF_PREVIEW_CACHE)
+  uri
+}
+
+fragment_plot_ui <- function(path) {
+  if (!file.exists(path)) return(tags$div(class = "empty-box", "Fragment-size plot not found."))
+  ext <- tolower(tools::file_ext(path))
+  src <- if (ext == "pdf") {
+    pdf_first_page_data_uri(path)
+  } else if (ext %in% c("png", "jpg", "jpeg", "webp") && BASE64_AVAILABLE) {
+    mime <- switch(ext, png = "image/png", webp = "image/webp", "image/jpeg")
+    paste0("data:", mime, ";base64,", base64enc::base64encode(path))
+  } else ""
+  if (!nzchar(src)) {
+    return(tags$div(
+      class = "empty-box",
+      tags$h4("The fragment-size plot could not be rendered."),
+      tags$p("The original file remains available in the project results."),
+      tags$code(path)
+    ))
+  }
+  tags$div(
+    class = "fragment-plot-frame",
+    tags$img(src = src, alt = paste("Fragment-size distribution for", basename(dirname(path))))
+  )
+}
+
 app_css <- "
 body { background:#eef3f8; color:#17202f; }
 .container-fluid { width:100%; max-width:none; padding:18px 22px 28px 22px; }
@@ -7112,6 +7276,8 @@ body { background:#eef3f8; color:#17202f; }
 .cutrun-metric-value { color:#143150; font-size:26px; line-height:1.15; font-weight:800; margin:7px 0 5px 0; overflow-wrap:anywhere; }
 .cutrun-metric-note { color:#657084; font-size:12px; line-height:1.35; }
 .cutrun-chart-card { background:white; border:1px solid #d8dde8; border-radius:10px; padding:14px 16px 8px 16px; margin:12px 0 18px 0; }
+.fragment-plot-frame { width:100%; height:680px; display:flex; align-items:center; justify-content:center; overflow:hidden; background:white; border:1px solid #d8dde8; border-radius:10px; padding:12px; }
+.native-results-host .fragment-plot-frame img { display:block; width:100% !important; height:100% !important; max-width:none !important; object-fit:contain !important; }
 .read-source-note { background:#f5f9ff; border-left:4px solid #2f6fed; border-radius:6px; padding:10px 12px; margin:8px 0 12px 0; color:#48627d; }
 .cutrun-results-host { overflow:visible !important; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }
 .cutrun-results-shell { background:rgba(255,255,255,.72); border:1px solid rgba(255,255,255,.9); border-radius:10px !important; box-shadow:none; overflow:hidden; }
@@ -9583,11 +9749,11 @@ server <- function(input, output, session) {
   })
   output$atac_postprocess_status <- render_csl_table(atac_postprocess_status_table(current_project()), page_length = 50)
   output$atac_insert_size_ui <- renderUI({
-    progress_refresh(); p <- current_project(); files <- if (dir.exists(file.path(p$data_dir, "bowtie2"))) list.files(file.path(p$data_dir, "bowtie2"), pattern = "_insert_size_histogram\\.(jpg|jpeg|png|pdf)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)
+    progress_refresh(); p <- current_project(); files <- cutrun_fragment_plot_files(p)
     if (!length(files)) return(div(class = "empty-box", "No insert-size histogram found yet."))
     selected <- selected_choice(input$atac_insert_size_file, files, files[[1]])
     path <- validated_project_result_path(p, selected)
-    tagList(selectInput("atac_insert_size_file", "Sample insert-size plot", choices = stats::setNames(files, basename(dirname(files))), selected = selected, selectize = FALSE), image_or_file_ui(path, "650px"))
+    tagList(selectInput("atac_insert_size_file", "Sample insert-size plot", choices = stats::setNames(files, basename(dirname(files))), selected = selected, selectize = FALSE), fragment_plot_ui(path))
   })
   output$atac_peak_file_ui <- renderUI({
     progress_refresh(); choices <- result_file_choices(current_project(), "macs2", "(narrowPeak|broadPeak|peaks_annotated\\.txt)$")
@@ -9705,7 +9871,7 @@ server <- function(input, output, session) {
     if (!nzchar(path)) return(div(class = "empty-box", "Choose a sample with a completed Picard insert-size plot."))
     tagList(
       div(class = "cutrun-section-heading", tags$h4("Insert-size distribution"), tags$p(basename(dirname(path)))),
-      image_or_file_ui(path, "700px")
+      fragment_plot_ui(path)
     )
   })
   output$cutrun_alignment_plot <- renderPlot({
@@ -9906,9 +10072,25 @@ server <- function(input, output, session) {
     progress_refresh()
     p <- current_project()
     choices <- cutrun_files_by_category(p, input$cutrun_file_category %||% "qc")
-    if (!length(choices)) return(div(class = "empty-box", "No files are available in this category yet."))
+    sample_choices <- cutrun_file_sample_choices(p, choices)
+    selected_sample <- selected_choice(input$cutrun_file_sample, sample_choices, "__all__")
+    choices <- filter_result_files_by_sample(p, choices, selected_sample)
+    if (!length(choices)) return(div(class = "empty-box", "No files are available for this sample in the selected category."))
     paths <- unname(choices)
     selectInput("cutrun_file", "Result file", choices = choices, selected = selected_choice(input$cutrun_file, paths, paths[[1]]), selectize = FALSE)
+  })
+  output$cutrun_file_sample_ui <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
+    progress_refresh()
+    choices <- cutrun_files_by_category(current_project(), input$cutrun_file_category %||% "qc")
+    sample_choices <- cutrun_file_sample_choices(current_project(), choices)
+    selectInput(
+      "cutrun_file_sample",
+      "Sample",
+      choices = sample_choices,
+      selected = selected_choice(input$cutrun_file_sample, sample_choices, "__all__"),
+      selectize = FALSE
+    )
   })
   output$cutrun_file_metadata_ui <- renderUI({
     path <- validated_project_result_path(current_project(), input$cutrun_file)

@@ -42,6 +42,11 @@ assert(identical(mouse_chip_ref$genome_version, "mouse_gencodeM39") && grepl("mo
 assert(identical(human_chip_ref$genome_version, "human_gencode50") && grepl("human_gencode50", human_chip_ref$bowtie2_index), "ChIP human reference uses GRCh38/GENCODE v50")
 assert(length(app_env$genome_reference_choices("mouse", "ChIP-seq")) == 1L, "ChIP setup offers only the current mouse reference")
 assert(length(app_env$genome_reference_choices("human", "ChIP-seq")) == 1L, "ChIP setup offers only the current human reference")
+assert(identical(app_env$numeric_sort_kind(c("900 KB", "1.2 GB", "14 B")), "bytes"), "human-readable file sizes receive numeric table sorting")
+assert(identical(app_env$numeric_sort_kind(c("9", "100", "2.5")), "numeric"), "numeric text receives numeric table sorting")
+assert(identical(app_env$numeric_sort_kind(c("00:09:00", "01:00:00")), "duration"), "elapsed times receive duration sorting")
+size_defs <- app_env$smart_table_column_defs(data.frame(size = c("900 KB", "1.2 GB"), stringsAsFactors = FALSE))
+assert(any(vapply(size_defs, function(def) identical(if (is.null(def$type)) "" else def$type, "num") && !is.null(def$render) && grepl("Math.pow(1024", as.character(def$render), fixed = TRUE), logical(1))), "table renderer uses byte-aware numeric sort values")
 for (project_variant in list(
   RNA = within(chip_project, { analysis_key <- "rna"; analysis <- "RNA-seq" }),
   CUTRUN = within(chip_project, { analysis_key <- "cutrun"; analysis <- "CUT&RUN" }),
@@ -145,6 +150,16 @@ run_log <- file.path(sample_dir, "A1_macs2.log")
 marker <- file.path(sample_dir, "A1_macs2_complete.txt")
 writeLines("chr1\t1\t2", legacy_peak)
 assert(identical(app_env$atac_macs2_completion_target(atac_project, "A1"), legacy_peak), "legacy ATAC peaks remain recognized")
+writeLines(c("chr1\t1\t200\tpeak1", "chr1\t300\t500\tpeak2"), legacy_peak)
+failed_macs_job <- data.frame(step = "MACS2 Peaks", sample = "A1", slurm_state = "FAILED", elapsed = "00:01:00", stderr = "", stringsAsFactors = FALSE)
+legacy_peak_progress <- app_env$sample_progress(atac_project, jobs = failed_macs_job)$table
+legacy_peak_status <- legacy_peak_progress$status[legacy_peak_progress$sample == "A1" & legacy_peak_progress$step == "MACS2 Peaks"]
+assert(identical(legacy_peak_status, "Completed"), "validated legacy ATAC peaks are not hidden by a later failed retry")
+writeLines(rep("validated alignment summary", 8), partial_targets[[1]])
+failed_bowtie_job <- data.frame(step = "Bowtie2", sample = "A1", slurm_state = "FAILED", elapsed = "00:01:00", stderr = "", stringsAsFactors = FALSE)
+failed_bowtie_progress <- app_env$sample_progress(atac_project, jobs = failed_bowtie_job)$table
+assert(identical(failed_bowtie_progress$status[failed_bowtie_progress$sample == "A1" & failed_bowtie_progress$step == "Bowtie2"], "Likely failed"), "legacy-output exception is limited to ATAC MACS2 peaks")
+unlink(partial_targets[[1]])
 writeLines("Traceback (most recent call last):\nOSError: No space left on device", run_log)
 assert(identical(app_env$atac_macs2_completion_target(atac_project, "A1"), marker), "new ATAC runs require a completion marker")
 assert(app_env$cutrun_macs_fatal_error_signal(atac_project, data.frame(), "MACS2 Peaks", "A1"), "ATAC internal MACS2 exception detection")
@@ -163,10 +178,20 @@ dir.create(alignment_dir, recursive = TRUE, showWarnings = FALSE)
 writeLines(c("sample\tA1", "mapped_reads\t100", "deduplicated_reads\t80", "bigwig_normalization\tCPM"), file.path(alignment_dir, "A1_alignment_summary.txt"))
 signal_file <- file.path(alignment_dir, "A1Aligned.sortedByCoord_removeDup.out.bw")
 writeLines("fake bigWig", signal_file)
+fragment_pdf <- file.path(alignment_dir, "A1_insert_size_histogram.pdf")
+grDevices::pdf(fragment_pdf, width = 8, height = 5)
+graphics::plot(1:10, type = "h", main = "Synthetic insert sizes")
+grDevices::dev.off()
+fragment_html <- as.character(app_env$fragment_plot_ui(fragment_pdf))
+assert(grepl("fragment-plot-frame", fragment_html, fixed = TRUE) && grepl("data:image/png;base64", fragment_html, fixed = TRUE) && !grepl("iframe", fragment_html, fixed = TRUE), "fragment PDFs render directly as standardized images")
+assert(identical(app_env$pdf_first_page_data_uri(fragment_pdf), app_env$pdf_first_page_data_uri(fragment_pdf)), "fragment PDF rendering is cached in memory")
 chip_alignment <- app_env$chip_alignment_summary_table(chip_project)
 assert(NROW(chip_alignment) == 1L && all(c("role", "condition", "matched_input") %in% names(chip_alignment)) && chip_alignment$matched_input[[1]] == "I1", "ChIP alignment summary includes experimental roles")
 chip_signal <- app_env$peak_signal_track_table(chip_project)
 assert(NROW(chip_signal) == 1L && chip_signal$role[[1]] == "chip" && chip_signal$normalization[[1]] == "CPM", "ChIP signal table reports role and saved normalization")
+fake_file_choices <- stats::setNames(c(signal_file, file.path(root, "bowtie2", "B1", "B1_signal.bw")), c("A1 signal", "B1 signal"))
+assert(identical(app_env$result_file_sample(chip_project, signal_file), "A1"), "result files resolve to their design sample")
+assert(identical(unname(app_env$filter_result_files_by_sample(chip_project, fake_file_choices, "A1")), signal_file), "sample file filter excludes other samples")
 assert(identical(app_env$validated_project_result_path(chip_project, signal_file), normalizePath(signal_file)), "current-project result path accepted")
 outside_file <- tempfile("outside-result-")
 writeLines("outside", outside_file)
@@ -188,6 +213,8 @@ for (ui_check in list(
 }
 assert(grepl("Initial QC", chip_ui_text, fixed = TRUE) && grepl("Fragment Size", chip_ui_text, fixed = TRUE), "ChIP Results Explorer includes RNA-style QC navigation")
 assert(grepl("Signal Tracks", atac_ui_text, fixed = TRUE) && grepl("Signal Tracks", chip_ui_text, fixed = TRUE), "ATAC and ChIP Results Explorers expose signal-track navigation")
+assert(grepl("cutrun_file_sample_ui", cutrun_ui_text, fixed = TRUE), "CUT&RUN file explorer exposes a sample selector")
+assert(grepl("height:680px", app_env$app_css, fixed = TRUE), "fragment plots share a fixed display height")
 
 rna_project <- chip_project
 rna_project$id <- "fake-rna"
