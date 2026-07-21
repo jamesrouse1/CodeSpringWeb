@@ -150,6 +150,27 @@ for (key in c("rna", "cutrun", "atac", "chip")) {
   }, logical(1))
   assert(all(readable), paste(key, "bundled example FASTQs are readable gzip data"))
 }
+assert(identical(app_env$example_dataset_paths("rna")$name, "example_dataset"), "RNA example project name matches the CodeSpringLab notebook output folder")
+rna_example <- app_env$example_dataset_paths("rna")
+rna_example_manifest <- file.path(rna_example$design_dir, "design_matrix.txt")
+rna_example_design <- app_env$safe_read_table(rna_example_manifest)
+rna_example_results <- file.path(root, "example_dataset", "data")
+rna_example_cutadapt <- file.path(rna_example_results, "cutadapt")
+dir.create(rna_example_cutadapt, recursive = TRUE, showWarnings = FALSE)
+rna_example_reads <- trimws(unlist(strsplit(as.character(rna_example_design$filename), "[;,]")))
+for (read in rna_example_reads[nzchar(rna_example_reads)]) {
+  writeBin(as.raw(rep(seq_len(100), 2)), file.path(rna_example_cutadapt, basename(read)))
+}
+rna_example_project <- list(
+  id = "rna/example_dataset", name = "example_dataset", analysis_key = "rna", analysis = "RNA-seq",
+  design_matrix_path = rna_example_manifest, data_dir = rna_example_results, results_root = dirname(dirname(rna_example_results)),
+  fastq_dir = rna_example$fastq_dir, fastq_dirs = rna_example$fastq_dir, paired_end = TRUE, genome = "mouse"
+)
+rna_example_progress <- app_env$sample_progress(rna_example_project, jobs = data.frame())$table
+rna_example_cutadapt_progress <- rna_example_progress[rna_example_progress$step == "Cutadapt", , drop = FALSE]
+assert(NROW(rna_example_cutadapt_progress) == NROW(rna_example_design) && all(rna_example_cutadapt_progress$status == "Completed"), "RNA example manifest maps every Cutadapt R1/R2 output")
+rna_example_status <- app_env$project_status(rna_example_project, jobs = data.frame(), progress = rna_example_progress)
+assert(identical(rna_example_status$status[rna_example_status$step == "Cutadapt"], "Complete"), "RNA example Cutadapt step reports Complete when all manifest outputs exist")
 cutrun_example <- app_env$safe_read_table(file.path(app_env$example_dataset_paths("cutrun")$design_dir, "design_matrix.txt"))
 assert(sum(cutrun_example$target_class == "control") == 2L, "CUT&RUN example has explicit matched controls")
 assert(all(c("cell_type", "mark", "target_class", "condition", "replicate", "control_sample") %in% names(cutrun_example)), "CUT&RUN example contains the editable assay metadata")
@@ -162,6 +183,23 @@ atac_project$analysis <- "ATAC-seq"
 initial_progress <- app_env$sample_progress(atac_project, jobs = data.frame())$table
 initial_a1_bowtie <- initial_progress$status[initial_progress$sample == "A1" & initial_progress$step == "Bowtie2"]
 assert(identical(initial_a1_bowtie, "Not started"), "untouched samples start as Not started")
+cutadapt_dir <- file.path(root, "cutadapt")
+dir.create(cutadapt_dir, recursive = TRUE, showWarnings = FALSE)
+partial_cutadapt_output <- file.path(cutadapt_dir, "A1.fastq.gz")
+writeBin(as.raw(rep(seq_len(100), 2)), partial_cutadapt_output)
+partial_cutadapt_progress <- app_env$sample_progress(atac_project, jobs = data.frame())$table
+assert(
+  identical(partial_cutadapt_progress$status[partial_cutadapt_progress$sample == "A1" & partial_cutadapt_progress$step == "Cutadapt"], "Completed"),
+  "existing validated Cutadapt output is complete at sample level"
+)
+partial_cutadapt_status <- app_env$project_status(atac_project, jobs = data.frame(), progress = partial_cutadapt_progress)
+assert(
+  identical(partial_cutadapt_status$status[partial_cutadapt_status$step == "Cutadapt"], "Partial"),
+  "mixed completed and untouched Cutadapt samples report Partial rather than Not started"
+)
+assert(identical(partial_cutadapt_status$detail[partial_cutadapt_status$step == "Cutadapt"], "1/8 samples complete"), "partial Cutadapt status reports the completed sample count")
+assert(identical(app_env$status_css_key("Partial"), "partial"), "partial pipeline status has a dedicated visual state")
+unlink(partial_cutadapt_output)
 partial_targets <- app_env$sample_step_targets(atac_project, "A1", "Bowtie2")
 dir.create(dirname(partial_targets[[1]]), recursive = TRUE, showWarnings = FALSE)
 writeLines("partial", partial_targets[[1]])

@@ -617,7 +617,7 @@ migrate_user_legacy_projects <- function() {
 example_dataset_paths <- function(key) {
   switch(
     analysis_key(key),
-    rna = list(name = "example_rnaseq", fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_dir = RNA_EXAMPLE_DESIGN_DIR),
+    rna = list(name = "example_dataset", fastq_dir = RNA_EXAMPLE_FASTQ_DIR, design_dir = RNA_EXAMPLE_DESIGN_DIR),
     cutrun = list(name = "example_cutrun", fastq_dir = CUTRUN_EXAMPLE_FASTQ_DIR, design_dir = CUTRUN_EXAMPLE_DESIGN_DIR),
     atac = list(name = "example_atac", fastq_dir = ATAC_EXAMPLE_FASTQ_DIR, design_dir = ATAC_EXAMPLE_DESIGN_DIR),
     chip = list(name = "example_chip", fastq_dir = CHIP_EXAMPLE_FASTQ_DIR, design_dir = CHIP_EXAMPLE_DESIGN_DIR),
@@ -2776,7 +2776,7 @@ active_job_state_map_from_jobs <- function(jobs) {
 
 normalize_pipeline_status <- function(status) {
   status <- as.character(status)
-  known <- c("Complete", "Active", "Cancelled", "Likely failed", "Completed, Deleted", "Likely failed, Deleted", "Cancelled, Deleted")
+  known <- c("Complete", "Partial", "Active", "Cancelled", "Likely failed", "Completed, Deleted", "Likely failed, Deleted", "Cancelled, Deleted")
   ifelse(status %in% known, status, "Not started")
 }
 
@@ -2833,6 +2833,9 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
           raw$status[raw$step == step] <- "Complete"
         } else if (any(hit$status == "Likely failed")) {
           raw$status[raw$step == step] <- "Likely failed"
+        } else if (any(hit$status == "Completed")) {
+          raw$status[raw$step == step] <- "Partial"
+          raw$detail[raw$step == step] <- sprintf("%d/%d samples complete", sum(hit$status == "Completed"), NROW(hit))
         } else {
           raw$status[raw$step == step] <- "Not started"
         }
@@ -2893,6 +2896,9 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
           raw$status[raw$step == step] <- "Active"
         } else if (any(hit$status == "Likely failed")) {
           raw$status[raw$step == step] <- "Likely failed"
+        } else if (any(hit$status == "Completed")) {
+          raw$status[raw$step == step] <- "Partial"
+          raw$detail[raw$step == step] <- sprintf("%d/%d samples complete", sum(hit$status == "Completed"), NROW(hit))
         } else {
           raw$status[raw$step == step] <- "Not started"
         }
@@ -2973,6 +2979,9 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         raw$status[raw$step == step] <- "Active"
       } else if (any(hit$status == "Likely failed")) {
         raw$status[raw$step == step] <- "Likely failed"
+      } else if (any(hit$status == "Completed")) {
+        raw$status[raw$step == step] <- "Partial"
+        raw$detail[raw$step == step] <- sprintf("%d/%d samples complete", sum(hit$status == "Completed"), NROW(hit))
       } else {
         raw$status[raw$step == step] <- "Not started"
       }
@@ -2986,7 +2995,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
 }
 
 status_rank <- function(status) {
-  match(status, c("Active", "Likely failed", "Cancelled", "Likely failed, Deleted", "Cancelled, Deleted", "Completed, Deleted", "Complete", "Not started"), nomatch = 99)
+  match(status, c("Active", "Partial", "Likely failed", "Cancelled", "Likely failed, Deleted", "Cancelled, Deleted", "Completed, Deleted", "Complete", "Not started"), nomatch = 99)
 }
 
 rna_pipeline_order <- function() {
@@ -3028,6 +3037,7 @@ status_css_key <- function(status) {
   switch(as.character(status %||% ""),
     "Active" = "active",
     "Complete" = "complete",
+    "Partial" = "partial",
     "Cancelled" = "cancelled",
     "Likely failed" = "failed",
     "Completed, Deleted" = "deleted-complete",
@@ -8051,6 +8061,7 @@ body { background:#eef3f8; color:#17202f; }
 .status-pill { display:inline-flex; align-items:center; border-radius:999px; padding:4px 9px; font-size:12px; font-weight:700; white-space:nowrap; }
 .status-pill.active { color:#7c3d00; background:#fff4d6; border:1px solid #f0c36d; }
 .status-pill.complete { color:#0b6b3a; background:#def7e8; border:1px solid #8fd8ad; }
+.status-pill.partial { color:#725500; background:#fff8d6; border:1px solid #e4c75e; }
 .status-pill.cancelled { color:#8a2f24; background:#fff0ed; border:1px solid #e5a397; }
 .status-pill.failed { color:#8a2f24; background:#fff0ed; border:1px solid #e5a397; }
 .status-pill.deleted-complete { color:#315f4c; background:#eefaf3; border:1px solid #b7dfc7; }
@@ -8063,6 +8074,7 @@ body { background:#eef3f8; color:#17202f; }
 .tool-panel summary::-webkit-details-marker { display:none; }
 .tool-panel.complete { border-left:5px solid #27ae60; }
 .tool-panel.active { border-left:5px solid #d99a15; }
+.tool-panel.partial { border-left:5px solid #c9a227; }
 .tool-panel.cancelled { border-left:5px solid #d55745; }
 .tool-panel.failed, .tool-panel.deleted-failed, .tool-panel.deleted-cancelled { border-left:5px solid #d55745; }
 .tool-panel.deleted-complete { border-left:5px solid #7abf8d; }
@@ -8145,6 +8157,7 @@ body { background:#eef3f8; color:#17202f; }
 .pipeline-step { border:1px solid #d8dde8; border-radius:8px; padding:10px; display:flex; gap:10px; align-items:center; background:#fff4f3; }
 .pipeline-step.complete { background:#def7e8; border-color:#8fd8ad; }
 .pipeline-step.active { background:#fff4d6; border-color:#f0c36d; }
+.pipeline-step.partial { background:#fff8d6; border-color:#e4c75e; }
 .pipeline-step.cancelled { background:#fff0ed; border-color:#e5a397; }
 .pipeline-step.failed, .pipeline-step.deleted-failed, .pipeline-step.deleted-cancelled { background:#fff0ed; border-color:#e5a397; }
 .pipeline-step.deleted-complete { background:#eefaf3; border-color:#b7dfc7; }
@@ -8363,6 +8376,7 @@ body > .container-fluid > .row > .col-sm-10 {
 }
 .pipeline-step.complete { background: #eefaf3; }
 .pipeline-step.active { background: #fff8e6; }
+.pipeline-step.partial { background: #fffbea; }
 .pipeline-step.cancelled { background: #fff0ed; }
 .pipeline-step.failed, .pipeline-step.deleted-failed, .pipeline-step.deleted-cancelled { background: #fff0ed; }
 .pipeline-step.deleted-complete { background: #eefaf3; }
@@ -9266,7 +9280,7 @@ server <- function(input, output, session) {
     example <- example_dataset_paths(key)
     if (is.null(example)) return()
     current_name <- trimws(input$new_project_name %||% "")
-    if (!nzchar(current_name) || grepl("^example_(rnaseq|cutrun|atac|chip)$", current_name)) {
+    if (!nzchar(current_name) || grepl("^example_(dataset|rnaseq|cutrun|atac|chip)$", current_name)) {
       updateTextInput(session, "new_project_name", value = example$name)
     }
     new_fastq_folders(character(0))
