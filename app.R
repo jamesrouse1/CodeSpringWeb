@@ -5913,7 +5913,11 @@ submit_fastqc_jobs <- function(project, trimmed = FALSE, samples = NULL) {
   missing_scripts <- c(script, runner)
   missing_scripts <- missing_scripts[!file.exists(missing_scripts)]
   if (length(missing_scripts)) return(record_preflight_failure(project, "FastQC", paste("Required FastQC scripts are missing:", paste(missing_scripts, collapse = ", ")), "fastQC"))
-  input_mode <- if (trimmed) "trimmed reads" else "raw reads"
+  input_mode <- if (identical(tolower(normalization_mode), "spikein")) {
+    if (trimmed) "trimmed reads" else "raw reads"
+  } else {
+    "existing aligned BAMs"
+  }
   commands <- vapply(seq_len(NROW(pairs)), function(i) {
     reads <- unique(unlist(lapply(c(pairs$r1[i], if (project$paired_end) pairs$r2[i] else character(0)), split_fastq_path_list), use.names = FALSE))
     reads <- reads[nzchar(reads)]
@@ -6107,6 +6111,11 @@ cutrun_postprocess_status_table <- function(project) {
     )
   })
   do.call(rbind, rows)
+}
+
+cutrun_track_regeneration_candidates <- function(status) {
+  if (is.null(status) || !NROW(status) || !all(c("sample", "status") %in% names(status))) return(character(0))
+  unique(as.character(status$sample[status$status != "Full Bowtie2 required"]))
 }
 
 cutrun_missing_bowtie2_message <- function(project, step = "this step", samples = NULL) {
@@ -6597,29 +6606,33 @@ submit_cutrun_postprocess_jobs <- function(project, samples, trimmed = TRUE, map
                                            dedup_target = FALSE, dedup_control = TRUE, remove_mito = TRUE,
                                            normalization_mode = "spikein", spikein_index_path = CUTRUN_DEFAULT_SPIKEIN_INDEX,
                                            spikein_name = CUTRUN_DEFAULT_SPIKEIN_NAME, spikein_min_reads = "1000") {
-  if (!isTRUE(project$paired_end)) return(record_preflight_failure(project, "Bowtie2", "Selective CUT&RUN post-alignment repair currently requires paired-end data.", "bowtie2_postprocess"))
+  if (!isTRUE(project$paired_end)) return(record_preflight_failure(project, "Bowtie2", "CUT&RUN signal-track regeneration currently requires paired-end data.", "bowtie2_postprocess"))
   samples <- unique(trimws(as.character(samples %||% character(0))))
   samples <- samples[nzchar(samples)]
-  if (!length(samples)) return(record_preflight_failure(project, "Bowtie2", "Select at least one repairable CUT&RUN sample.", "bowtie2_postprocess"))
+  if (!length(samples)) return(record_preflight_failure(project, "Bowtie2", "Select at least one aligned CUT&RUN sample.", "bowtie2_postprocess"))
   status <- cutrun_postprocess_status_table(project)
-  eligible <- if (NROW(status)) as.character(status$sample[status$status == "Repair available"]) else character(0)
+  eligible <- cutrun_track_regeneration_candidates(status)
   invalid <- setdiff(samples, eligible)
-  if (length(invalid)) return(record_preflight_failure(project, "Bowtie2", paste("These samples require full Bowtie2 or are already complete:", paste(invalid, collapse = ", ")), "bowtie2_postprocess"))
+  if (length(invalid)) return(record_preflight_failure(project, "Bowtie2", paste("These samples do not have both aligned BAMs and require full Bowtie2:", paste(invalid, collapse = ", ")), "bowtie2_postprocess"))
 
-  pairs <- sample_fastq_pairs(project, trimmed)
-  msg <- missing_read_message(project, pairs, trimmed)
-  if (nzchar(msg)) return(record_preflight_failure(project, "Bowtie2", msg, "bowtie2_postprocess"))
-  pairs <- pairs[pairs$sample %in% samples, , drop = FALSE]
-  missing_samples <- setdiff(samples, as.character(pairs$sample))
-  if (length(missing_samples)) return(record_preflight_failure(project, "Bowtie2", paste("FASTQ entries were not found for:", paste(missing_samples, collapse = ", ")), "bowtie2_postprocess"))
+  normalization_mode <- selected_choice(normalization_mode, c("CPM", "spikein", "none"), "spikein")
+  if (identical(tolower(normalization_mode), "spikein")) {
+    pairs <- sample_fastq_pairs(project, trimmed)
+    msg <- missing_read_message(project, pairs, trimmed)
+    if (nzchar(msg)) return(record_preflight_failure(project, "Bowtie2", msg, "bowtie2_postprocess"))
+    pairs <- pairs[pairs$sample %in% samples, , drop = FALSE]
+    missing_samples <- setdiff(samples, as.character(pairs$sample))
+    if (length(missing_samples)) return(record_preflight_failure(project, "Bowtie2", paste("FASTQ entries were not found for:", paste(missing_samples, collapse = ", ")), "bowtie2_postprocess"))
+  } else {
+    pairs <- data.frame(sample = samples, r1 = "none", r2 = "none", stringsAsFactors = FALSE)
+  }
 
   res <- cutrun_reference_resources(project)
   script <- file.path(SCRIPTS_DIR, "bowtie2", "qsub_bowtie2_cutrun_PE.sh")
   runner <- file.path(SCRIPTS_DIR, "bowtie2", "bowtie2_cutrun_PE.sh")
   missing_resources <- c(script, runner, res$chrom_sizes)[!file.exists(c(script, runner, res$chrom_sizes))]
-  if (length(missing_resources)) return(record_preflight_failure(project, "Bowtie2", paste("CUT&RUN repair resources are missing:", paste(missing_resources, collapse = ", ")), "bowtie2_postprocess"))
+  if (length(missing_resources)) return(record_preflight_failure(project, "Bowtie2", paste("CUT&RUN signal-track regeneration resources are missing:", paste(missing_resources, collapse = ", ")), "bowtie2_postprocess"))
 
-  normalization_mode <- selected_choice(normalization_mode, c("CPM", "spikein", "none"), "spikein")
   spikein_index_path <- trimws(as.character(spikein_index_path %||% "none"))
   if (!nzchar(spikein_index_path) || identical(tolower(spikein_index_path), "none")) spikein_index_path <- CUTRUN_DEFAULT_SPIKEIN_INDEX
   if (identical(tolower(normalization_mode), "spikein") && !file.exists(paste0(spikein_index_path, ".1.bt2"))) {
@@ -6632,13 +6645,18 @@ submit_cutrun_postprocess_jobs <- function(project, samples, trimmed = TRUE, map
     sample_dir <- file.path(project$data_dir, "bowtie2", sample)
     target_row <- design[design$sample == sample, , drop = FALSE]
     is_control <- NROW(target_row) && cutrun_control_like(target_row$target[1])
-    dedup_mode <- if ((is_control && isTRUE(dedup_control)) || (!is_control && isTRUE(dedup_target))) "dedup" else "keepdup"
+    fallback_dedup_mode <- if ((is_control && isTRUE(dedup_control)) || (!is_control && isTRUE(dedup_target))) "dedup" else "keepdup"
+    summary_lines <- read_metric_lines(cutrun_bowtie2_complete_marker(project, sample))
+    saved_dedup <- grep("^dedup_mode\\t", summary_lines, value = TRUE)
+    dedup_mode <- if (length(saved_dedup)) {
+      selected_choice(strsplit(saved_dedup[[1]], "\t", fixed = TRUE)[[1]][2] %||% "", c("dedup", "keepdup"), fallback_dedup_mode)
+    } else fallback_dedup_mode
     remove_mito_arg <- if (isTRUE(remove_mito)) "y" else "n"
     target <- cutrun_bowtie2_complete_marker(project, sample)
     submit_sbatch(
       project, "Bowtie2", script,
       c(file.path(sample_dir, sample), res$bowtie2_index, row[["r1"]], row[["r2"]], res$chrom_sizes, project$name, mapq, max_fragment, dedup_mode, remove_mito_arg, normalization_mode, spikein_index_path, spikein_name, spikein_min_reads, "repair"),
-      "bowtie2_postprocess", paste(input_mode, normalization_mode, "post-alignment repair"), sample = sample, target = target, reference = res$label
+      "bowtie2_postprocess", paste(input_mode, normalization_mode, "signal-track regeneration"), sample = sample, target = target, reference = res$label
     )
   })
   paste(messages, collapse = "\n")
@@ -9888,12 +9906,12 @@ server <- function(input, output, session) {
             tags$p(class = "muted small-note", "Choose spikein only when E. coli DNA was intentionally added. The alignment summary will report spike-in reads and the applied scale factor.")
           ),
           "run_cutrun_bowtie2", "Submit Bowtie2"),
-        tool_panel("Post-alignment Repair", status, "Resume incomplete CUT&RUN processing from existing aligned BAMs without repeating Bowtie2.",
+        tool_panel("Signal Track Regeneration", status, "Generate another CUT&RUN normalization from existing aligned BAMs without repeating genomic alignment.",
           tagList(
             uiOutput("cutrun_postprocess_controls_ui"),
-            tags$p(class = "muted small-note", "Only samples with valid aligned and duplicate-removed BAMs but missing downstream fragments or summaries are offered. Temporary sorting uses job-specific project storage instead of compute-node /tmp.")
+            tags$p(class = "muted small-note", "CPM and raw tracks are generated entirely from the existing genomic BAMs. E. coli spike-in regeneration also needs the original FASTQs because those reads must be aligned to the spike-in genome. Existing raw, CPM, and spike-in files use different suffixes and are preserved alongside one another.")
           ),
-          "run_cutrun_postprocess", "Repair selected samples", status_step = "Bowtie2", show_sample_progress = FALSE, show_job_actions = FALSE),
+          "run_cutrun_postprocess", "Generate selected signal tracks", status_step = "Bowtie2", show_sample_progress = FALSE, show_job_actions = FALSE),
         {
           seacr_norm_default <- if (identical(tolower(normalization_choice), "spikein")) "non" else "norm"
           tool_panel("SEACR", status, "Recommended sparse CUT&RUN peak calling from fragment bedGraphs.",
@@ -10111,12 +10129,39 @@ server <- function(input, output, session) {
     checks <- cutrun_postprocess_status_table(p)
     if (!NROW(checks)) return(div(class = "empty-box", "No CUT&RUN samples were found."))
     repairable <- checks[checks$status == "Repair available", , drop = FALSE]
-    if (!NROW(repairable)) return(tags$p(class = "muted small-note", "No selectively repairable CUT&RUN samples are currently detected."))
-    choices <- stats::setNames(as.character(repairable$sample), paste0(repairable$sample, " — ", repairable$issues))
+    eligible_samples <- cutrun_track_regeneration_candidates(checks)
+    eligible <- checks[checks$sample %in% eligible_samples, , drop = FALSE]
+    full_rerun <- checks[checks$status == "Full Bowtie2 required", , drop = FALSE]
+    if (!NROW(eligible)) return(div(class = "empty-box", paste("Run full Bowtie2 for:", paste(full_rerun$sample, collapse = ", "))))
+    choices <- stats::setNames(as.character(eligible$sample), paste0(eligible$sample, " — ", eligible$status, ifelse(eligible$status == "Complete", "", paste0(": ", eligible$issues))))
     selected <- intersect(as.character(input$cutrun_postprocess_samples %||% character(0)), unname(choices))
-    if (!length(selected)) selected <- as.character(repairable$sample)
-    checkboxGroupInput("cutrun_postprocess_samples", "Incomplete samples to repair", choices = choices, selected = selected)
+    if (!length(selected) && NROW(repairable)) selected <- as.character(repairable$sample)
+    selected_mode <- selected_choice(input$cutrun_postprocess_normalization_mode, c("CPM", "spikein", "none"), isolate(cutrun_normalization_choice()))
+    tagList(
+      selectInput(
+        "cutrun_postprocess_normalization_mode", "Track normalization to generate",
+        choices = c("CPM" = "CPM", "E. coli spike-in" = "spikein", "Raw / none" = "none"),
+        selected = selected_mode, selectize = FALSE
+      ),
+      div(
+        class = "step-sample-actions",
+        actionButton("cutrun_postprocess_samples_select_all", "Select all aligned samples", class = "btn-default btn-sm"),
+        actionButton("cutrun_postprocess_samples_clear", "Clear selection", class = "btn-default btn-sm")
+      ),
+      checkboxGroupInput("cutrun_postprocess_samples", "Aligned samples", choices = choices, selected = selected),
+      if (!NROW(repairable)) tags$p(class = "muted small-note", "All current outputs pass structural checks. Select any aligned sample to generate an additional normalization from its existing BAM."),
+      if (NROW(full_rerun)) tags$p(class = "muted small-note", paste("Full Bowtie2 is still required for:", paste(full_rerun$sample, collapse = ", ")))
+    )
   })
+
+  observeEvent(input$cutrun_postprocess_samples_select_all, {
+    checks <- cutrun_postprocess_status_table(current_project())
+    updateCheckboxGroupInput(session, "cutrun_postprocess_samples", selected = cutrun_track_regeneration_candidates(checks))
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$cutrun_postprocess_samples_clear, {
+    updateCheckboxGroupInput(session, "cutrun_postprocess_samples", selected = character(0))
+  }, ignoreInit = TRUE)
 
   output$cutrun_dedup_sensitivity_samples_ui <- renderUI({
     p <- current_project(); if (!is_cutrun_project(p)) return(NULL)
@@ -10336,7 +10381,7 @@ server <- function(input, output, session) {
   observeEvent(input$run_cutrun_postprocess, {
     samples <- input$cutrun_postprocess_samples %||% character(0)
     trimmed <- isTRUE(input$cutrun_bowtie2_use_trimmed)
-    normalization_choice <- isolate(cutrun_normalization_choice())
+    normalization_choice <- selected_choice(input$cutrun_postprocess_normalization_mode, c("CPM", "spikein", "none"), isolate(cutrun_normalization_choice()))
     run_submission(
       "Bowtie2",
       submit_cutrun_postprocess_jobs(
@@ -10352,7 +10397,7 @@ server <- function(input, output, session) {
         spikein_name = CUTRUN_DEFAULT_SPIKEIN_NAME,
         spikein_min_reads = input$cutrun_spikein_min_reads %||% "1000"
       ),
-      paste("CUT&RUN post-alignment repair:", paste(samples, collapse = ", ")),
+      paste("CUT&RUN", normalization_choice, "signal-track generation:", paste(samples, collapse = ", ")),
       samples = samples
     )
   })

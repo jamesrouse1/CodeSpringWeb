@@ -75,6 +75,15 @@ assert(any(vapply(size_defs, function(def) identical(if (is.null(def$type)) "" e
 rough_table <- structure(list(c(1, 2), I(list(c("a", "b"), "c"))), names = c("", ""), class = "data.frame", row.names = c(NA_integer_, -2L))
 normalized_table <- app_env$normalize_csl_table_data(rough_table)
 assert(!anyDuplicated(names(normalized_table)) && all(nzchar(names(normalized_table))) && !any(vapply(normalized_table, is.list, logical(1))), "table renderer sanitizes blank/duplicate names and list columns before DT serialization")
+track_status <- data.frame(
+  sample = c("complete_sample", "repair_sample", "unaligned_sample"),
+  status = c("Complete", "Repair available", "Full Bowtie2 required"),
+  stringsAsFactors = FALSE
+)
+assert(
+  identical(app_env$cutrun_track_regeneration_candidates(track_status), c("complete_sample", "repair_sample")),
+  "CUT&RUN signal-track regeneration accepts complete and repairable aligned samples without offering unaligned samples"
+)
 for (project_variant in list(
   RNA = within(chip_project, { analysis_key <- "rna"; analysis <- "RNA-seq" }),
   CUTRUN = within(chip_project, { analysis_key <- "cutrun"; analysis <- "CUT&RUN" }),
@@ -549,6 +558,7 @@ assert(identical(app_env$completed_cutrun_seacr_samples(seacr_selector_project, 
 app_source_text <- paste(readLines(file.path(repo_root, "app.R"), warn = FALSE), collapse = "\n")
 assert(grepl("Select all samples", app_source_text, fixed = TRUE) && grepl("Clear selection", app_source_text, fixed = TRUE), "sample-level step selectors expose select-all and clear controls")
 assert(grepl("cslRestoreToolPanels", app_source_text, fixed = TRUE) && grepl("server = TRUE", app_source_text, fixed = TRUE), "pipeline panels preserve open state and tables use server-side rendering")
+assert(grepl("Track normalization to generate", app_source_text, fixed = TRUE) && grepl("Generate selected signal tracks", app_source_text, fixed = TRUE), "CUT&RUN app exposes normalization regeneration from existing aligned BAMs")
 
 assert(system2("bash", c("-n", shQuote(file.path(repo_root, "run_codespringweb.sh")))) == 0L, "CodeSpringApp launcher shell syntax is valid")
 
