@@ -2487,8 +2487,8 @@ tool_reference_summary <- function(project) {
       c("Reference", "CUT&RUN genome reference", ref$label, paste0(genome_species(project), " / ", genome_reference_key(project)), "Bowtie2, SEACR, MACS2", paste("Bowtie2 index:", ref$bowtie2_index, "| Chrom sizes:", ref$chrom_sizes)),
       c("Tool", "FastQC", fastqc_modules, "Read quality control", "Raw or trimmed FASTQ", "Input mode selected per run; reruns skip completed samples and submit failed/deleted samples only."),
       c("Tool", "cutadapt", cutadapt_modules, "Adapter trimming", "Raw FASTQ", "Adapter presets or custom adapters from Run Pipeline; minimum length from Run Pipeline."),
-      c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment and normalization", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, E. coli K-12 MG1655 spike-in normalization, keep target duplicates, deduplicate IgG/input controls, and remove mitochondrial fragments from peak-calling bedGraphs. CPM and no normalization remain available as explicit alternatives."),
-      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Bowtie2 normalized fragment bedGraphs and optional IgG/input control bedGraph", "Stringent is the primary default; relaxed is available globally or per sample through seacr_stringency in design_matrix.txt. target_class records TF/focal versus narrow- or broad-histone biology but does not silently change SEACR stringency. non is used for spike-in-normalized tracks and norm for CPM/raw tracks. Controls are selected from control_sample or inferred IgG/input rows."),
+      c("Tool", "Bowtie2", bowtie2_modules, "CUT&RUN fragment alignment and normalization", ref$label, "Defaults: MAPQ 30, max fragment 1000 bp, E. coli K-12 MG1655 spike-in normalization, keep target duplicates, deduplicate IgG/input controls, and remove mitochondrial fragments from peak-calling bedGraphs. CPM tracks are also written from the same fragments for visualization and comparison."),
+      c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Spike-in, CPM, or raw fragment bedGraphs and matched IgG/input control bedGraph", "With spike-in Bowtie2 normalization, the default SEACR non configuration uses spike-in-scaled tracks. The raw/norm configuration makes SEACR normalize the control internally. Each configuration is stored separately."),
       c("Tool", "Peak QC", "BEDTools module listed in CodeSpringLab script", "Consensus peaks, peak count matrix, and FRiP summary", "SEACR peak BED files and Bowtie2 BAM files", "Merges SEACR peaks across samples and counts fragments over consensus peaks."),
       c("Tool", "DiffBind/DESeq2", diffbind_modules, "Mark-specific CUT&RUN differential binding", "SEACR peaks, target BAMs, and automatically resolved E. coli spike-in BAMs", "Analyzes each cell type/mark separately and compares every non-reference condition with the selected reference. At least two biological replicates are required in each condition. The ATAC-like default admits a peak supported by one or more replicates; stricter consensus support is available under Advanced. Native SEACR widths are preserved with summits=FALSE; IgG BAMs are not subtracted again."),
       c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01. Auto mode uses broad peaks for histone_broad targets and narrow peaks for histone_narrow or tf_or_other targets; a run-wide narrow or broad override remains available.")
@@ -3318,10 +3318,11 @@ cutrun_seacr_frip_table <- function(project) {
     if (!length(vals)) return(NULL)
     sample <- basename(dirname(path))
     parent <- basename(dirname(dirname(path)))
-    combo <- if (grepl("^(norm|non)_(stringent|relaxed)$", parent)) parent else "legacy"
+    combo <- if (grepl("^((spikein|cpm)_non|raw_norm|norm|non)_(stringent|relaxed)$", parent)) parent else "legacy"
     cols <- c(
       sample = sample,
       seacr_run = combo,
+      peak_count = vals[["peak_count"]] %||% "",
       frip = vals[["frip"]] %||% "",
       fragments_in_peaks = vals[["fragments_in_peaks"]] %||% "",
       total_fragments = vals[["total_fragments"]] %||% "",
@@ -3434,7 +3435,7 @@ genome_browser_track_catalog <- function(project) {
     } else "signal"
     run_name <- if (is_cutrun_project(project) && !is_signal) {
       parts <- strsplit(normalizePath(path, winslash = "/", mustWork = FALSE), "/", fixed = TRUE)[[1]]
-      combo <- parts[grepl("^(norm|non)_(stringent|relaxed)$", parts)]
+      combo <- parts[grepl("^((spikein|cpm)_non|raw_norm|norm|non)_(stringent|relaxed)$", parts)]
       if (length(combo)) combo[[length(combo)]] else basename(dirname(dirname(path)))
     } else ""
     label <- if (is_signal) {
@@ -5855,15 +5856,15 @@ completed_samples_for_step <- function(project, step, samples) {
   intersect(samples, sample_submission_plan(project, step, targets)$complete)
 }
 
-completed_cutrun_seacr_samples <- function(project, samples, norm = "non", stringency = "stringent") {
+completed_cutrun_seacr_samples <- function(project, samples, norm = "non", stringency = "stringent", track = "") {
   samples <- unique(trimws(as.character(samples %||% character(0))))
   samples <- samples[!is.na(samples) & nzchar(samples)]
   if (!length(samples)) return(character(0))
   peak_paths <- vapply(samples, function(sample) {
-    cutrun_seacr_peak_path(project, sample, norm, stringency)
+    cutrun_seacr_peak_path(project, sample, norm, stringency, track)
   }, character(1))
   summary_paths <- vapply(samples, function(sample) {
-    cutrun_seacr_summary_path(project, sample, norm, stringency)
+    cutrun_seacr_summary_path(project, sample, norm, stringency, track)
   }, character(1))
   samples[file.exists(peak_paths) & file.exists(summary_paths) & vapply(summary_paths, file_size_for, numeric(1)) >= minimum_expected_bytes("SEACR")]
 }
@@ -5987,15 +5988,26 @@ cutrun_seacr_stringency_for <- function(project, sample, default = "stringent") 
   if (value %in% c("stringent", "relaxed")) value else default
 }
 
-cutrun_seacr_combo_key <- function(norm = "non", stringency = "stringent") {
+cutrun_seacr_config <- function(config = "cpm_non") {
+  config <- selected_choice(tolower(trimws(as.character(config %||% "cpm_non"))), c("spikein_non", "cpm_non", "raw_norm"), "cpm_non")
+  switch(config,
+    spikein_non = list(key = config, track = "spikein", norm = "non", label = "spike-in-scaled track / SEACR non"),
+    raw_norm = list(key = config, track = "raw", norm = "norm", label = "raw track / SEACR norm"),
+    list(key = "cpm_non", track = "cpm", norm = "non", label = "CPM track / SEACR non")
+  )
+}
+
+cutrun_seacr_combo_key <- function(norm = "non", stringency = "stringent", track = "") {
   norm <- selected_choice(tolower(trimws(as.character(norm %||% "non"))), c("norm", "non"), "non")
   stringency <- selected_choice(tolower(trimws(as.character(stringency %||% "stringent"))), c("stringent", "relaxed"), "stringent")
+  track <- tolower(trimws(as.character(track %||% "")))
+  if (track %in% c("spikein", "cpm", "raw")) return(paste(track, norm, stringency, sep = "_"))
   paste(norm, stringency, sep = "_")
 }
 
-cutrun_seacr_combo_dir <- function(project, norm = "non", stringency = "stringent", sensitivity = FALSE) {
+cutrun_seacr_combo_dir <- function(project, norm = "non", stringency = "stringent", sensitivity = FALSE, track = "") {
   root <- if (isTRUE(sensitivity)) "cutrun_dedup_sensitivity" else "seacr"
-  file.path(project$data_dir, root, cutrun_seacr_combo_key(norm, stringency))
+  file.path(project$data_dir, root, cutrun_seacr_combo_key(norm, stringency, track))
 }
 
 cutrun_macs2_peak_type_for <- function(project, sample, default = "auto") {
@@ -6051,6 +6063,8 @@ cutrun_bowtie2_complete_marker <- function(project, sample) {
 
 cutrun_bowtie2_bedgraph <- function(project, sample) {
   sample_dir <- file.path(project$data_dir, "bowtie2", sample)
+  cpm_path <- file.path(sample_dir, paste0(sample, "_fragments.CPM.bedgraph"))
+  if (file.exists(cpm_path) && file_size_for(cpm_path) > 0) return(cpm_path)
   summary_path <- file.path(sample_dir, paste0(sample, "_alignment_summary.txt"))
   if (file.exists(summary_path)) {
     lines <- read_metric_lines(summary_path)
@@ -6060,21 +6074,27 @@ cutrun_bowtie2_bedgraph <- function(project, sample) {
       if (nzchar(path) && file.exists(path)) return(path)
     }
   }
-  for (suffix in c("_fragments.spikein.bedgraph", "_fragments.CPM.bedgraph", "_fragments.raw.bedgraph")) {
+  for (suffix in c("_fragments.CPM.bedgraph", "_fragments.spikein.bedgraph", "_fragments.raw.bedgraph")) {
     path <- file.path(sample_dir, paste0(sample, suffix))
     if (file.exists(path)) return(path)
   }
   file.path(sample_dir, paste0(sample, "_fragments.raw.bedgraph"))
 }
 
-cutrun_seacr_bedgraph <- function(project, sample, norm = "non") {
+cutrun_seacr_bedgraph <- function(project, sample, norm = "non", track = "") {
   sample_dir <- file.path(project$data_dir, "bowtie2", sample)
   norm <- selected_choice(tolower(trimws(as.character(norm %||% "non"))), c("norm", "non"), "non")
+  track <- tolower(trimws(as.character(track %||% "")))
+  if (identical(track, "spikein")) return(file.path(sample_dir, paste0(sample, "_fragments.spikein.bedgraph")))
+  if (identical(track, "cpm")) return(file.path(sample_dir, paste0(sample, "_fragments.CPM.bedgraph")))
+  if (identical(track, "raw")) return(file.path(sample_dir, paste0(sample, "_fragments.raw.bedgraph")))
   if (identical(norm, "norm")) {
     raw <- file.path(sample_dir, paste0(sample, "_fragments.raw.bedgraph"))
     return(raw)
   }
-  cutrun_bowtie2_bedgraph(project, sample)
+  # `non` means the inputs have already been normalized.  Require CPM instead
+  # of silently falling back to an older spike-in track from a prior run.
+  file.path(sample_dir, paste0(sample, "_fragments.CPM.bedgraph"))
 }
 
 cutrun_bowtie2_fragments <- function(project, sample) {
@@ -6662,7 +6682,7 @@ submit_cutrun_postprocess_jobs <- function(project, samples, trimmed = TRUE, map
   paste(messages, collapse = "\n")
 }
 
-submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "stringent", samples = NULL) {
+submit_cutrun_seacr_jobs <- function(project, norm = "non", stringency = "stringent", samples = NULL, track = "cpm") {
   norm <- selected_choice(tolower(trimws(as.character(norm %||% "norm"))), c("norm", "non"), "norm")
   stringency <- selected_choice(tolower(trimws(as.character(stringency %||% "stringent"))), c("stringent", "relaxed"), "stringent")
   dir.create(file.path(project$data_dir, "seacr"), recursive = TRUE, showWarnings = FALSE)
@@ -6687,18 +6707,18 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
   }
   controls <- vapply(as.character(design$sample), function(sample) cutrun_control_sample_for(project, sample), character(1))
   required_bedgraphs <- c(
-    vapply(as.character(design$sample), function(sample) cutrun_seacr_bedgraph(project, sample, norm), character(1)),
-    vapply(controls[nzchar(controls)], function(control) cutrun_seacr_bedgraph(project, control, norm), character(1))
+    vapply(as.character(design$sample), function(sample) cutrun_seacr_bedgraph(project, sample, norm, track), character(1)),
+    vapply(controls[nzchar(controls)], function(control) cutrun_seacr_bedgraph(project, control, norm, track), character(1))
   )
   missing_bedgraphs <- unique(required_bedgraphs[!file.exists(required_bedgraphs) | vapply(required_bedgraphs, file_size_for, numeric(1)) <= 0])
   if (length(missing_bedgraphs)) {
     return(record_preflight_failure(project, "SEACR", paste(c(
-      if (identical(norm, "norm")) "SEACR norm requires raw target and control bedGraphs." else "SEACR non requires completed normalized target and control bedGraphs.",
+      paste0("SEACR ", norm, " requires the selected ", track, " target and control bedGraphs."),
       "Missing or empty files:", missing_bedgraphs
     ), collapse = "\n"), "seacr"))
   }
   target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) {
-    cutrun_seacr_summary_path(project, sample, norm, stringency)
+    cutrun_seacr_summary_path(project, sample, norm, stringency, track)
   }), as.character(design$sample))
   plan <- sample_submission_plan(project, "SEACR", target_list)
   if (!length(plan$samples)) return(plan$message)
@@ -6706,21 +6726,21 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
   script <- file.path(SCRIPTS_DIR, "SEACR", "qsub_seacr_cutrun.sh")
   messages <- vapply(as.character(design$sample), function(sample) {
     sample_stringency <- cutrun_seacr_stringency_for(project, sample, stringency)
-    sample_dir <- file.path(cutrun_seacr_combo_dir(project, norm, sample_stringency), sample)
+    sample_dir <- file.path(cutrun_seacr_combo_dir(project, norm, sample_stringency, track = track), sample)
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     control <- cutrun_control_sample_for(project, sample)
-    control_bdg <- if (nzchar(control)) cutrun_seacr_bedgraph(project, control, norm) else "none"
-    target <- cutrun_seacr_summary_path(project, sample, norm, sample_stringency)
+    control_bdg <- if (nzchar(control)) cutrun_seacr_bedgraph(project, control, norm, track) else "none"
+    target <- cutrun_seacr_summary_path(project, sample, norm, sample_stringency, track)
     submit_sbatch(
       project, "SEACR", script,
-      c(cutrun_seacr_bedgraph(project, sample, norm), control_bdg, norm, sample_stringency, file.path(sample_dir, sample), project$name, cutrun_bowtie2_fragments(project, sample), file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh")),
-      "seacr", paste(norm, sample_stringency), sample = sample, target = target, reference = "SEACR local script"
+      c(cutrun_seacr_bedgraph(project, sample, norm, track), control_bdg, norm, sample_stringency, file.path(sample_dir, sample), project$name, cutrun_bowtie2_fragments(project, sample), file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh")),
+      "seacr", paste(track, norm, sample_stringency), sample = sample, target = target, reference = "SEACR local script"
     )
   }, character(1))
   paste(append_plan_message(messages, plan), collapse = "\n")
 }
 
-submit_cutrun_dedup_sensitivity_jobs <- function(project, samples = character(0), norm = "non", stringency = "stringent", max_fragment = "1000", remove_mito = TRUE) {
+submit_cutrun_dedup_sensitivity_jobs <- function(project, samples = character(0), norm = "non", stringency = "stringent", max_fragment = "1000", remove_mito = TRUE, track = "cpm") {
   design <- cutrun_target_design(project, include_controls = FALSE)
   if (!NROW(design)) return(record_preflight_failure(project, "SEACR sensitivity", "No non-control CUT&RUN target samples were found.", "cutrun_dedup_sensitivity"))
   requested_samples <- unique(trimws(as.character(samples %||% character(0))))
@@ -6741,7 +6761,7 @@ submit_cutrun_dedup_sensitivity_jobs <- function(project, samples = character(0)
   stringency <- selected_choice(stringency, c("stringent", "relaxed"), "stringent")
   max_fragment <- suppressWarnings(as.integer(max_fragment))
   if (!is.finite(max_fragment) || max_fragment <= 0) return(record_preflight_failure(project, "SEACR sensitivity", "Maximum fragment length must be a positive whole number.", "cutrun_dedup_sensitivity"))
-  outdir <- cutrun_seacr_combo_dir(project, norm, stringency, sensitivity = TRUE)
+  outdir <- cutrun_seacr_combo_dir(project, norm, stringency, sensitivity = TRUE, track = track)
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   full_design <- cutrun_design(project)
   if (any(cutrun_control_like(full_design$target))) {
@@ -6755,7 +6775,7 @@ submit_cutrun_dedup_sensitivity_jobs <- function(project, samples = character(0)
     inputs <- c(
       file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bam")),
       cutrun_bowtie2_complete_marker(project, sample),
-      if (nzchar(control)) cutrun_seacr_bedgraph(project, control, norm) else character(0)
+      if (nzchar(control)) cutrun_seacr_bedgraph(project, control, norm, track) else character(0)
     )
     missing_inputs <- c(missing_inputs, inputs[!file.exists(inputs) | vapply(inputs, file_size_for, numeric(1)) <= 0])
   }
@@ -6767,24 +6787,24 @@ submit_cutrun_dedup_sensitivity_jobs <- function(project, samples = character(0)
     prefix <- file.path(sample_dir, sample)
     submit_sbatch(
       project, "SEACR sensitivity", qsub,
-      c(file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bam")), res$chrom_sizes, cutrun_bowtie2_complete_marker(project, sample), if (nzchar(control)) cutrun_seacr_bedgraph(project, control, norm) else "none", norm, stringency, prefix, project$name, max_fragment, if (isTRUE(remove_mito)) "y" else "n", seacr_runner, runner),
-      "cutrun_dedup_sensitivity", paste("deduplicated target;", norm, stringency), sample = sample,
+      c(file.path(project$data_dir, "bowtie2", sample, paste0(sample, "Aligned.sortedByCoord_removeDup.out.bam")), res$chrom_sizes, cutrun_bowtie2_complete_marker(project, sample), if (nzchar(control)) cutrun_seacr_bedgraph(project, control, norm, track) else "none", norm, stringency, prefix, project$name, max_fragment, if (isTRUE(remove_mito)) "y" else "n", seacr_runner, runner),
+      "cutrun_dedup_sensitivity", paste("deduplicated target;", track, norm, stringency), sample = sample,
       target = file.path(sample_dir, paste0(sample, ".", stringency, ".bed")), reference = "deduplicated target BAM + matched control"
     )
   }, character(1))
   paste(messages, collapse = "\n")
 }
 
-submit_cutrun_peakqc_job <- function(project, norm = "non", stringency = "stringent") {
+submit_cutrun_peakqc_job <- function(project, norm = "non", stringency = "stringent", track = "cpm") {
   data_dir <- project$data_dir
   norm <- selected_choice(tolower(trimws(as.character(norm %||% "non"))), c("norm", "non"), "non")
   stringency <- selected_choice(tolower(trimws(as.character(stringency %||% "stringent"))), c("stringent", "relaxed"), "stringent")
-  seacr_dir <- cutrun_seacr_combo_dir(project, norm, stringency)
+  seacr_dir <- cutrun_seacr_combo_dir(project, norm, stringency, track = track)
   bowtie2_dir <- file.path(data_dir, "bowtie2")
   if (count_files(seacr_dir, "\\.bed$") == 0) {
     return(record_preflight_failure(project, "Peak QC", "Run SEACR successfully before building consensus peaks and FRiP summaries.", "cutrun_peak_qc"))
   }
-  outdir <- file.path(data_dir, "cutrun_peak_qc", cutrun_seacr_combo_key(norm, stringency))
+  outdir <- file.path(data_dir, "cutrun_peak_qc", cutrun_seacr_combo_key(norm, stringency, track))
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   target <- file.path(outdir, "seacr_consensus_peaks.bed")
   jobs <- job_history(project)
@@ -6831,11 +6851,11 @@ cutrun_spikein_bam <- function(project, sample) {
   file.path(project$data_dir, "bowtie2", sample, paste0(sample, "_", metrics[["spikein_name"]], ".bam"))
 }
 
-cutrun_seacr_peak_path <- function(project, sample, norm = NULL, stringency = NULL) {
+cutrun_seacr_peak_path <- function(project, sample, norm = NULL, stringency = NULL, track = "") {
   root <- file.path(project$data_dir, "seacr")
   if (!is.null(norm) && !is.null(stringency)) {
     actual_stringency <- cutrun_seacr_stringency_for(project, sample, stringency)
-    return(file.path(cutrun_seacr_combo_dir(project, norm, actual_stringency), sample, paste0(sample, ".", actual_stringency, ".bed")))
+    return(file.path(cutrun_seacr_combo_dir(project, norm, actual_stringency, track = track), sample, paste0(sample, ".", actual_stringency, ".bed")))
   }
   escaped <- gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", sample, perl = TRUE)
   hit <- if (dir.exists(root)) list.files(root, pattern = paste0("^", escaped, "\\.(stringent|relaxed)\\.bed$"), recursive = TRUE, full.names = TRUE) else character(0)
@@ -6851,10 +6871,10 @@ cutrun_seacr_peak_path <- function(project, sample, norm = NULL, stringency = NU
   file.path(root, sample, paste0(sample, ".stringent.bed"))
 }
 
-cutrun_seacr_summary_path <- function(project, sample, norm = "non", stringency = "stringent") {
+cutrun_seacr_summary_path <- function(project, sample, norm = "non", stringency = "stringent", track = "") {
   actual_stringency <- cutrun_seacr_stringency_for(project, sample, stringency)
   file.path(
-    cutrun_seacr_combo_dir(project, norm, actual_stringency), sample,
+    cutrun_seacr_combo_dir(project, norm, actual_stringency, track = track), sample,
     paste0(sample, "_seacr_summary.txt")
   )
 }
@@ -6903,7 +6923,7 @@ cutrun_diffbind_comparison_plan <- function(project, reference_condition, min_re
   out[order(!out$eligible, out$cell_type, out$mark, out$comparison), , drop = FALSE]
 }
 
-cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_replicates = 1L, cell_type = "", mark = "", comparison = "", seacr_norm = "non", seacr_stringency = "stringent") {
+cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_replicates = 1L, cell_type = "", mark = "", comparison = "", seacr_norm = "non", seacr_stringency = "stringent", track = "cpm") {
   design <- cutrun_target_design(project, include_controls = FALSE)
   if (!NROW(design)) stop("No non-control CUT&RUN samples were found in design_matrix.txt.")
   reference_condition <- trimws(as.character(reference_condition %||% ""))
@@ -6927,7 +6947,7 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
   rows <- lapply(seq_len(NROW(design)), function(i) {
     sample <- as.character(design$sample[[i]])
     metrics <- cutrun_alignment_values(project, sample)
-    use_spikein <- identical(tolower(trimws(as.character(seacr_norm))), "non") && identical(metrics[["normalization_mode"]], "spikein")
+    use_spikein <- identical(track, "spikein")
     data.frame(
       SampleID = sample,
       CellType = trimws(as.character(design$cell_type[[i]] %||% "all")),
@@ -6935,7 +6955,7 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
       Condition = trimws(as.character(design$condition[[i]])),
       Replicate = trimws(as.character(design$replicate[[i]])),
       bamReads = cutrun_bowtie2_signal_bam(project, sample),
-      Peaks = cutrun_seacr_peak_path(project, sample, seacr_norm, seacr_stringency),
+      Peaks = cutrun_seacr_peak_path(project, sample, seacr_norm, seacr_stringency, track),
       Spikein = if (use_spikein) cutrun_spikein_bam(project, sample) else "",
       normalization_mode = if (use_spikein) "spikein" else "none",
       stringsAsFactors = FALSE
@@ -6966,13 +6986,13 @@ cutrun_diffbind_sample_sheet <- function(project, reference_condition, min_repli
 
   out_dir <- file.path(project$data_dir, "manifest", "cutrun_diffbind")
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-  sheet_name <- if (nzchar(cell_type) || nzchar(mark) || nzchar(comparison)) clean_name(paste(cutrun_seacr_combo_key(seacr_norm, seacr_stringency), cell_type, mark, comparison, "vs", reference_condition, sep = "_"), "comparison") else paste0(cutrun_seacr_combo_key(seacr_norm, seacr_stringency), "_resolved_samples")
+  sheet_name <- if (nzchar(cell_type) || nzchar(mark) || nzchar(comparison)) clean_name(paste(cutrun_seacr_combo_key(seacr_norm, seacr_stringency, track), cell_type, mark, comparison, "vs", reference_condition, sep = "_"), "comparison") else paste0(cutrun_seacr_combo_key(seacr_norm, seacr_stringency, track), "_resolved_samples")
   path <- file.path(out_dir, paste0(sheet_name, ".tsv"))
   utils::write.table(sheet, path, sep = "\t", row.names = FALSE, quote = FALSE)
   path
 }
 
-submit_cutrun_diffbind_jobs <- function(project, reference_condition, comparison_ids, min_replicates = 1L, seacr_norm = "non", seacr_stringency = "stringent") {
+submit_cutrun_diffbind_jobs <- function(project, reference_condition, comparison_ids, min_replicates = 1L, seacr_norm = "non", seacr_stringency = "stringent", track = "cpm") {
   min_replicates <- suppressWarnings(as.integer(min_replicates))
   if (!is.finite(min_replicates) || min_replicates < 1L) min_replicates <- 1L
   plan <- cutrun_diffbind_comparison_plan(project, reference_condition, min_replicates)
@@ -6995,7 +7015,7 @@ submit_cutrun_diffbind_jobs <- function(project, reference_condition, comparison
   messages <- character(0)
   for (i in seq_len(NROW(selected))) {
     spec <- selected[i, , drop = FALSE]
-    run_slug <- paste(cutrun_seacr_combo_key(seacr_norm, seacr_stringency), clean_name(spec$cell_type), clean_name(spec$mark), paste0(clean_name(spec$comparison), "_vs_", clean_name(reference_condition)), sep = "__")
+    run_slug <- paste(cutrun_seacr_combo_key(seacr_norm, seacr_stringency, track), clean_name(spec$cell_type), clean_name(spec$mark), paste0(clean_name(spec$comparison), "_vs_", clean_name(reference_condition)), sep = "__")
     outdir <- file.path(root, run_slug); dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
     target <- file.path(outdir, "_COMPLETE")
     if (file.exists(target)) {
@@ -7007,14 +7027,14 @@ submit_cutrun_diffbind_jobs <- function(project, reference_condition, comparison
     if (NROW(active)) {
       messages <- c(messages, paste(spec$label, "is already active; skipped.")); next
     }
-    sample_sheet <- tryCatch(cutrun_diffbind_sample_sheet(project, reference_condition, min_replicates, spec$cell_type, spec$mark, spec$comparison, seacr_norm, seacr_stringency), error = function(e) e)
+    sample_sheet <- tryCatch(cutrun_diffbind_sample_sheet(project, reference_condition, min_replicates, spec$cell_type, spec$mark, spec$comparison, seacr_norm, seacr_stringency, track), error = function(e) e)
     if (inherits(sample_sheet, "error")) {
       messages <- c(messages, record_preflight_failure(project, "Differential Peaks", paste(spec$label, conditionMessage(sample_sheet), sep = ": "), "cutrun_diffbind")); next
     }
     messages <- c(messages, submit_sbatch(
       project, "Differential Peaks", qsub,
       c(r_script, sample_sheet, outdir, reference_condition, min_replicates, genome_species(project), if (nzchar(blacklist)) blacklist else "none", spec$comparison, spec$cell_type, spec$mark, runner),
-      "cutrun_diffbind", paste(spec$label, ";", cutrun_seacr_combo_key(seacr_norm, seacr_stringency), "; consensus support", min_replicates), sample = run_slug,
+      "cutrun_diffbind", paste(spec$label, ";", cutrun_seacr_combo_key(seacr_norm, seacr_stringency, track), "; consensus support", min_replicates), sample = run_slug,
       target = target, reference = paste("SEACR + DiffBind/DESeq2;", genome_species(project))
     ))
   }
@@ -7049,11 +7069,13 @@ submit_cutrun_macs2_jobs <- function(project, qvalue = "0.01", peak_type = "auto
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     sample_peak_type <- cutrun_macs2_peak_type_for(project, sample, peak_type)
     control <- cutrun_control_sample_for(project, sample)
-    control_bam <- if (nzchar(control)) cutrun_bowtie2_bam(project, control) else "none"
+    # Use the same signal BAM selection (keep-duplicates or duplicate-removed)
+    # that produced the CPM fragment tracks supplied to SEACR.
+    control_bam <- if (nzchar(control)) cutrun_bowtie2_signal_bam(project, control) else "none"
     target <- file.path(sample_dir, paste0(sample, "_macs2_complete.txt"))
     submit_sbatch(
       project, "MACS2 (optional)", script,
-      c(sample, cutrun_bowtie2_bam(project, sample), control_bam, res$macs2_genome, qvalue, sample_peak_type, sample_dir, project$name, runner),
+      c(sample, cutrun_bowtie2_signal_bam(project, sample), control_bam, res$macs2_genome, qvalue, sample_peak_type, sample_dir, project$name, runner),
       "macs2", paste(sample_peak_type, "q", qvalue), sample = sample, target = target, reference = res$macs2_genome
     )
   }, character(1))
@@ -9454,8 +9476,8 @@ server <- function(input, output, session) {
   observeEvent(input$cutrun_normalization_mode, {
     choice <- selected_choice(input$cutrun_normalization_mode, c("CPM", "spikein", "none"), isolate(cutrun_normalization_choice()))
     cutrun_normalization_choice(choice)
-    seacr_norm <- if (identical(tolower(choice), "spikein")) "non" else "norm"
-    updateSelectInput(session, "cutrun_seacr_norm", selected = seacr_norm)
+    default_config <- if (identical(tolower(choice), "spikein")) "spikein_non" else if (identical(tolower(choice), "cpm")) "cpm_non" else "raw_norm"
+    updateSelectInput(session, "cutrun_seacr_config", selected = default_config)
   }, ignoreInit = FALSE)
 
   output$project_card <- renderUI({
@@ -9903,24 +9925,27 @@ server <- function(input, output, session) {
             checkboxInput("cutrun_dedup_targets", "Deduplicate target reads", value = isTRUE(input$cutrun_dedup_targets)),
             checkboxInput("cutrun_dedup_controls", "Deduplicate IgG/input controls", value = if (is.null(input$cutrun_dedup_controls)) TRUE else isTRUE(input$cutrun_dedup_controls)),
             checkboxInput("cutrun_remove_mito", "Remove mitochondrial fragments from peak-calling bedGraph", value = if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito)),
-            tags$p(class = "muted small-note", "Choose spikein only when E. coli DNA was intentionally added. The alignment summary will report spike-in reads and the applied scale factor.")
+            tags$p(class = "muted small-note", "CPM is the recommended shared track for SEACR and visualization. Choose spike-in only when E. coli DNA was intentionally added; CPM tracks are still written alongside it." )
           ),
           "run_cutrun_bowtie2", "Submit Bowtie2"),
         tool_panel("Signal Track Regeneration", status, "Generate another CUT&RUN normalization from existing aligned BAMs without repeating genomic alignment.",
           tagList(
             uiOutput("cutrun_postprocess_controls_ui"),
-            tags$p(class = "muted small-note", "CPM and raw tracks are generated entirely from the existing genomic BAMs. E. coli spike-in regeneration also needs the original FASTQs because those reads must be aligned to the spike-in genome. Existing raw, CPM, and spike-in files use different suffixes and are preserved alongside one another.")
+            tags$p(class = "muted small-note", "CPM and raw tracks are regenerated from the existing genomic BAMs. Regeneration replaces raw/CPM files with tracks from that same BAM; E. coli spike-in regeneration also needs the original FASTQs. The alignment summary records the exact resulting track paths.")
           ),
           "run_cutrun_postprocess", "Generate selected signal tracks", status_step = "Bowtie2", show_sample_progress = FALSE, show_job_actions = FALSE),
         {
-          seacr_norm_default <- if (identical(tolower(normalization_choice), "spikein")) "non" else "norm"
-          tool_panel("SEACR", status, "Recommended sparse CUT&RUN peak calling from fragment bedGraphs.",
+          tool_panel("SEACR", status, "Run independent SEACR peak-call configurations from the same fragment set.",
           tagList(
             uiOutput("cutrun_seacr_samples_ui"),
-            selectInput("cutrun_seacr_norm", "SEACR normalization", choices = c("norm", "non"), selected = selected_choice(input$cutrun_seacr_norm, c("norm", "non"), seacr_norm_default), selectize = FALSE),
+            selectInput("cutrun_seacr_config", "SEACR configuration", choices = c(
+              "Spike-in-scaled tracks + SEACR non" = "spikein_non",
+              "CPM tracks + SEACR non" = "cpm_non",
+              "Raw tracks + SEACR norm" = "raw_norm"
+            ), selected = selected_choice(input$cutrun_seacr_config, c("spikein_non", "cpm_non", "raw_norm"), if (identical(tolower(normalization_choice), "spikein")) "spikein_non" else if (identical(tolower(normalization_choice), "cpm")) "cpm_non" else "raw_norm"), selectize = FALSE),
             selectInput("cutrun_seacr_stringency", "Default SEACR stringency", choices = c("Stringent (recommended default)" = "stringent", "Relaxed" = "relaxed"), selected = selected_choice(input$cutrun_seacr_stringency, c("stringent", "relaxed"), "stringent"), selectize = FALSE),
-            tags$p(class = "muted small-note", "SEACR normalization follows the Bowtie signal automatically: non for E. coli spike-in, norm for CPM or raw signal. A sample-level stringent/relaxed value in design_matrix.txt overrides this default; auto uses this setting. TF versus histone class does not automatically change SEACR stringency."),
-            tags$p(class = "muted small-note", "Each normalization/stringency combination is preserved separately under data/seacr (for example, non_stringent or norm_relaxed). Selecting norm uses raw bedGraphs so SEACR performs the target/control normalization; selecting non uses the already normalized Bowtie2 tracks."),
+            tags$p(class = "muted small-note", "Run each configuration separately; outputs are preserved under distinct folders, for example spikein_non_stringent, cpm_non_stringent, and raw_norm_stringent. All three track types are generated from the same selected signal BAMs."),
+            tags$p(class = "muted small-note", "MACS2 is a separate BAMPE comparison: it uses the same source target/control BAM selection, but performs its own internal target/control depth normalization and does not consume a CPM or spike-in bedGraph."),
             tags$p(class = "muted small-note", "Use stringent for the primary analysis. Relaxed is an optional sensitivity analysis and is not automatically required for histone marks."),
             tags$p(class = "muted small-note", "IgG/input rows do not receive their own SEACR peak job. Their Bowtie2 bedGraph is used as the control for matched target samples, so SEACR progress intentionally lists targets only.")
           ),
@@ -10281,14 +10306,16 @@ server <- function(input, output, session) {
   output$cutrun_bowtie2_samples_ui <- renderUI(step_sample_selector("cutrun_bowtie2_samples", "Targets and controls to align", "Bowtie2"))
   output$cutrun_seacr_samples_ui <- renderUI({
     p <- current_project()
-    norm <- selected_choice(tolower(input$cutrun_seacr_norm %||% "norm"), c("norm", "non"), "norm")
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
+    norm <- config$norm
+    track <- config$track
     stringency <- selected_choice(tolower(input$cutrun_seacr_stringency %||% "stringent"), c("stringent", "relaxed"), "stringent")
     samples <- pipeline_step_sample_candidates(p, targets_only = TRUE)
-    completed <- tryCatch(completed_cutrun_seacr_samples(p, samples, norm, stringency), error = function(e) character(0))
+    completed <- tryCatch(completed_cutrun_seacr_samples(p, samples, norm, stringency, track), error = function(e) character(0))
     step_sample_selector(
       "cutrun_seacr_samples", "Target samples for SEACR", "SEACR", targets_only = TRUE,
       completed_override = completed,
-      completion_key = paste(p$id %||% p$name, norm, stringency, sep = "::")
+      completion_key = paste(p$id %||% p$name, track, norm, stringency, sep = "::")
     )
   })
   output$cutrun_macs2_samples_ui <- renderUI(step_sample_selector("cutrun_macs2_samples", "Target samples for MACS2", "MACS2 (optional)", targets_only = TRUE))
@@ -10451,40 +10478,44 @@ server <- function(input, output, session) {
   })
   observeEvent(input$run_cutrun_seacr, {
     samples <- input$cutrun_seacr_samples %||% character(0)
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
     run_submission(
       "SEACR",
-      submit_cutrun_seacr_jobs(current_project(), input$cutrun_seacr_norm %||% "norm", input$cutrun_seacr_stringency %||% "stringent", samples),
-      paste(input$cutrun_seacr_norm %||% "norm", input$cutrun_seacr_stringency %||% "stringent"),
+      submit_cutrun_seacr_jobs(current_project(), config$norm, input$cutrun_seacr_stringency %||% "stringent", samples, config$track),
+      paste(config$key, input$cutrun_seacr_stringency %||% "stringent"),
       samples = samples
     )
   })
   observeEvent(input$run_cutrun_dedup_sensitivity, {
     samples <- input$cutrun_dedup_sensitivity_samples %||% character(0)
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
     run_submission(
       "SEACR sensitivity",
       submit_cutrun_dedup_sensitivity_jobs(
-        current_project(), samples, input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent",
-        input$cutrun_max_fragment %||% "1000", if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito)
+        current_project(), samples, config$norm, input$cutrun_seacr_stringency %||% "stringent",
+        input$cutrun_max_fragment %||% "1000", if (is.null(input$cutrun_remove_mito)) TRUE else isTRUE(input$cutrun_remove_mito), config$track
       ),
-      paste("deduplicated targets:", paste(samples, collapse = ", "), ";", input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent"),
+      paste("deduplicated targets:", paste(samples, collapse = ", "), ";", config$key, input$cutrun_seacr_stringency %||% "stringent"),
       samples = samples
     )
   })
   observeEvent(input$run_cutrun_peakqc, {
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
     run_submission(
       "Peak QC",
-      submit_cutrun_peakqc_job(current_project(), input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent"),
-      paste("consensus peaks + FRiP", input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent")
+      submit_cutrun_peakqc_job(current_project(), config$norm, input$cutrun_seacr_stringency %||% "stringent", config$track),
+      paste("consensus peaks + FRiP", config$key, input$cutrun_seacr_stringency %||% "stringent")
     )
   })
   observeEvent(input$run_cutrun_diffbind, {
     reference <- input$cutrun_diffbind_reference %||% ""
     support <- input$cutrun_diffbind_min_replicates %||% 1
     comparisons <- input$cutrun_diffbind_jobs %||% character(0)
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
     run_submission(
       "Differential Peaks",
-      submit_cutrun_diffbind_jobs(current_project(), reference, comparisons, support, input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent"),
-      paste(length(comparisons), "comparison job(s);", input$cutrun_seacr_norm %||% "non", input$cutrun_seacr_stringency %||% "stringent", "; reference", reference, "; consensus support", support)
+      submit_cutrun_diffbind_jobs(current_project(), reference, comparisons, support, config$norm, input$cutrun_seacr_stringency %||% "stringent", config$track),
+      paste(length(comparisons), "comparison job(s);", config$key, input$cutrun_seacr_stringency %||% "stringent", "; reference", reference, "; consensus support", support)
     )
   })
   observeEvent(input$run_cutrun_macs2, {
