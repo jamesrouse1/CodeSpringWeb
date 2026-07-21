@@ -517,6 +517,35 @@ cutrun_example_project$design_matrix_path <- file.path(app_env$example_dataset_p
 cutrun_targets <- app_env$pipeline_step_sample_candidates(cutrun_example_project, targets_only = TRUE)
 assert(length(cutrun_targets) == 4L && !any(grepl("IgG", cutrun_targets)), "CUT&RUN peak-step selectors contain targets but not controls")
 
+seacr_selector_root <- file.path(root, "cutrun-seacr-selector")
+dir.create(seacr_selector_root, recursive = TRUE)
+seacr_selector_design <- data.frame(
+  sample = c("S1", "S2"), include = c(TRUE, TRUE), cell_type = c("AKP", "AKP"),
+  mark = c("Creb", "Creb"), target = c("Creb", "Creb"), target_class = c("tf_or_other", "tf_or_other"),
+  seacr_stringency = c("auto", "auto"), condition = c("AA", "AA"), replicate = c(1, 2),
+  control_sample = c("", ""), filename = c("S1.fastq.gz", "S2.fastq.gz"), stringsAsFactors = FALSE
+)
+seacr_selector_design_path <- file.path(seacr_selector_root, "design_matrix.txt")
+write.table(seacr_selector_design, seacr_selector_design_path, sep = "\t", row.names = FALSE, quote = FALSE)
+seacr_selector_project <- cutrun_example_project
+seacr_selector_project$id <- "cutrun-seacr-selector"
+seacr_selector_project$name <- "cutrun-seacr-selector"
+seacr_selector_project$data_dir <- file.path(seacr_selector_root, "data")
+seacr_selector_project$design_matrix_path <- seacr_selector_design_path
+for (spec in list(c("S1", "norm"), c("S2", "non"))) {
+  sample <- spec[[1]]
+  norm <- spec[[2]]
+  peak <- app_env$cutrun_seacr_peak_path(seacr_selector_project, sample, norm, "stringent")
+  summary <- app_env$cutrun_seacr_summary_path(seacr_selector_project, sample, norm, "stringent")
+  dir.create(dirname(peak), recursive = TRUE, showWarnings = FALSE)
+  file.create(peak)
+  writeLines(c(paste0("normalization\t", norm), "stringency\tstringent", "peak_count\t0"), summary)
+}
+assert(identical(app_env$completed_cutrun_seacr_samples(seacr_selector_project, c("S1", "S2"), "norm", "stringent"), "S1"), "SEACR selector completion is specific to norm/stringency and accepts a completed zero-peak result")
+assert(identical(app_env$completed_cutrun_seacr_samples(seacr_selector_project, c("S1", "S2"), "non", "stringent"), "S2"), "SEACR non completion does not hide samples from the norm selector")
+app_source_text <- paste(readLines(file.path(repo_root, "app.R"), warn = FALSE), collapse = "\n")
+assert(grepl("Select all samples", app_source_text, fixed = TRUE) && grepl("Clear selection", app_source_text, fixed = TRUE), "sample-level step selectors expose select-all and clear controls")
+
 assert(system2("bash", c("-n", shQuote(file.path(repo_root, "run_codespringweb.sh")))) == 0L, "CodeSpringApp launcher shell syntax is valid")
 
 bad_q <- app_env$submit_atac_macs2_jobs(atac_project, "not-a-number", "A1")

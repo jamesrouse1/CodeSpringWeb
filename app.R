@@ -5822,6 +5822,19 @@ completed_samples_for_step <- function(project, step, samples) {
   intersect(samples, sample_submission_plan(project, step, targets)$complete)
 }
 
+completed_cutrun_seacr_samples <- function(project, samples, norm = "non", stringency = "stringent") {
+  samples <- unique(trimws(as.character(samples %||% character(0))))
+  samples <- samples[!is.na(samples) & nzchar(samples)]
+  if (!length(samples)) return(character(0))
+  peak_paths <- vapply(samples, function(sample) {
+    cutrun_seacr_peak_path(project, sample, norm, stringency)
+  }, character(1))
+  summary_paths <- vapply(samples, function(sample) {
+    cutrun_seacr_summary_path(project, sample, norm, stringency)
+  }, character(1))
+  samples[file.exists(peak_paths) & file.exists(summary_paths) & vapply(summary_paths, file_size_for, numeric(1)) >= minimum_expected_bytes("SEACR")]
+}
+
 target_outputs_ready_or_planned <- function(target_list, planned_samples = character(0), min_size = 1) {
   if (!length(target_list) || is.null(names(target_list))) return(FALSE)
   planned_samples <- unique(as.character(planned_samples %||% character(0)))
@@ -6634,8 +6647,7 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
     ), collapse = "\n"), "seacr"))
   }
   target_list <- stats::setNames(lapply(as.character(design$sample), function(sample) {
-    sample_stringency <- cutrun_seacr_stringency_for(project, sample, stringency)
-    file.path(cutrun_seacr_combo_dir(project, norm, sample_stringency), sample, paste0(sample, ".", sample_stringency, ".bed"))
+    cutrun_seacr_summary_path(project, sample, norm, stringency)
   }), as.character(design$sample))
   plan <- sample_submission_plan(project, "SEACR", target_list)
   if (!length(plan$samples)) return(plan$message)
@@ -6647,7 +6659,7 @@ submit_cutrun_seacr_jobs <- function(project, norm = "norm", stringency = "strin
     dir.create(sample_dir, recursive = TRUE, showWarnings = FALSE)
     control <- cutrun_control_sample_for(project, sample)
     control_bdg <- if (nzchar(control)) cutrun_seacr_bedgraph(project, control, norm) else "none"
-    target <- file.path(sample_dir, paste0(sample, ".", sample_stringency, ".bed"))
+    target <- cutrun_seacr_summary_path(project, sample, norm, sample_stringency)
     submit_sbatch(
       project, "SEACR", script,
       c(cutrun_seacr_bedgraph(project, sample, norm), control_bdg, norm, sample_stringency, file.path(sample_dir, sample), project$name, cutrun_bowtie2_fragments(project, sample), file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh")),
@@ -6786,6 +6798,14 @@ cutrun_seacr_peak_path <- function(project, sample, norm = NULL, stringency = NU
   }
   if (length(hit)) return(hit[[which.max(file.info(hit)$mtime)]])
   file.path(root, sample, paste0(sample, ".stringent.bed"))
+}
+
+cutrun_seacr_summary_path <- function(project, sample, norm = "non", stringency = "stringent") {
+  actual_stringency <- cutrun_seacr_stringency_for(project, sample, stringency)
+  file.path(
+    cutrun_seacr_combo_dir(project, norm, actual_stringency), sample,
+    paste0(sample, "_seacr_summary.txt")
+  )
 }
 
 cutrun_diffbind_conditions <- function(project) {
@@ -10104,20 +10124,34 @@ server <- function(input, output, session) {
     project_level_step_summary_ui(current_project(), job_history_state(), "GSEA")
   })
 
-  step_sample_selector <- function(input_id, label, step, targets_only = FALSE) {
+  step_selector_context <- new.env(parent = emptyenv())
+
+  step_sample_selector <- function(input_id, label, step, targets_only = FALSE, completed_override = NULL, completion_key = step) {
     p <- current_project()
     samples <- pipeline_step_sample_candidates(p, targets_only)
     if (!length(samples)) return(div(class = "empty-box", "No included samples were found in the saved design matrix."))
-    completed <- tryCatch(completed_samples_for_step(p, step, samples), error = function(e) character(0))
+    completed <- if (is.null(completed_override)) {
+      tryCatch(completed_samples_for_step(p, step, samples), error = function(e) character(0))
+    } else {
+      intersect(samples, unique(as.character(completed_override)))
+    }
     incomplete <- setdiff(samples, completed)
     current <- isolate(input[[input_id]])
-    selected <- if (is.null(current)) incomplete else intersect(as.character(current), incomplete)
+    previous_key <- if (exists(input_id, envir = step_selector_context, inherits = FALSE)) get(input_id, envir = step_selector_context) else NULL
+    context_changed <- is.null(previous_key) || !identical(previous_key, completion_key)
+    assign(input_id, completion_key, envir = step_selector_context)
+    selected <- if (is.null(current) || context_changed) incomplete else intersect(as.character(current), samples)
     choice_labels <- ifelse(samples %in% completed, paste0(samples, " — complete"), samples)
     choices <- stats::setNames(samples, choice_labels)
     div(
       class = "step-sample-selector",
+      div(
+        class = "step-sample-actions",
+        actionButton(paste0(input_id, "_select_all"), "Select all samples", class = "btn-default btn-sm"),
+        actionButton(paste0(input_id, "_clear"), "Clear selection", class = "btn-default btn-sm")
+      ),
       checkboxGroupInput(input_id, label, choices = choices, selected = selected, inline = FALSE),
-      tags$p(class = "muted small-note", "Successfully completed samples are automatically unchecked. Delete that sample's results for this step before intentionally rerunning it; active jobs are still skipped safely.")
+      tags$p(class = "muted small-note", "Successfully completed samples are automatically unchecked when this step or analysis setting is first selected. Select all is available for bulk selection; completed and active samples are still skipped safely at submission.")
     )
   }
 
@@ -10130,7 +10164,18 @@ server <- function(input, output, session) {
   output$cutrun_cutadapt_samples_ui <- renderUI(step_sample_selector("cutrun_cutadapt_samples", "Samples to trim", "Cutadapt"))
   output$cutrun_fastqc_samples_ui <- renderUI(step_sample_selector("cutrun_fastqc_samples", "Samples for QC", "FastQC"))
   output$cutrun_bowtie2_samples_ui <- renderUI(step_sample_selector("cutrun_bowtie2_samples", "Targets and controls to align", "Bowtie2"))
-  output$cutrun_seacr_samples_ui <- renderUI(step_sample_selector("cutrun_seacr_samples", "Target samples for SEACR", "SEACR", targets_only = TRUE))
+  output$cutrun_seacr_samples_ui <- renderUI({
+    p <- current_project()
+    norm <- selected_choice(tolower(input$cutrun_seacr_norm %||% "norm"), c("norm", "non"), "norm")
+    stringency <- selected_choice(tolower(input$cutrun_seacr_stringency %||% "stringent"), c("stringent", "relaxed"), "stringent")
+    samples <- pipeline_step_sample_candidates(p, targets_only = TRUE)
+    completed <- tryCatch(completed_cutrun_seacr_samples(p, samples, norm, stringency), error = function(e) character(0))
+    step_sample_selector(
+      "cutrun_seacr_samples", "Target samples for SEACR", "SEACR", targets_only = TRUE,
+      completed_override = completed,
+      completion_key = paste(p$id %||% p$name, norm, stringency, sep = "::")
+    )
+  })
   output$cutrun_macs2_samples_ui <- renderUI(step_sample_selector("cutrun_macs2_samples", "Target samples for MACS2", "MACS2 (optional)", targets_only = TRUE))
   output$atac_cutadapt_samples_ui <- renderUI(step_sample_selector("atac_cutadapt_samples", "Samples to trim", "Cutadapt"))
   output$atac_fastqc_samples_ui <- renderUI(step_sample_selector("atac_fastqc_samples", "Samples for QC", "FastQC"))
@@ -10140,6 +10185,28 @@ server <- function(input, output, session) {
   output$chip_fastqc_samples_ui <- renderUI(step_sample_selector("chip_fastqc_samples", "Samples for QC", "FastQC"))
   output$chip_bowtie2_samples_ui <- renderUI(step_sample_selector("chip_bowtie2_samples", "ChIP and input samples to align", "Bowtie2"))
   output$chip_macs2_samples_ui <- renderUI(step_sample_selector("chip_macs2_samples", "ChIP targets for peak calling", "MACS2 Peaks", targets_only = TRUE))
+
+  sample_selector_specs <- list(
+    rna_cutadapt_samples = FALSE, rna_fastqc_samples = FALSE, rna_star_samples = FALSE,
+    rna_featurecounts_samples = FALSE, rna_rsem_samples = FALSE, rna_kallisto_samples = FALSE,
+    cutrun_cutadapt_samples = FALSE, cutrun_fastqc_samples = FALSE, cutrun_bowtie2_samples = FALSE,
+    cutrun_seacr_samples = TRUE, cutrun_macs2_samples = TRUE,
+    atac_cutadapt_samples = FALSE, atac_fastqc_samples = FALSE, atac_bowtie2_samples = FALSE,
+    atac_macs2_samples = FALSE, chip_cutadapt_samples = FALSE, chip_fastqc_samples = FALSE,
+    chip_bowtie2_samples = FALSE, chip_macs2_samples = TRUE
+  )
+  for (selector_id in names(sample_selector_specs)) {
+    local({
+      id <- selector_id
+      targets_only <- isTRUE(sample_selector_specs[[selector_id]])
+      observeEvent(input[[paste0(id, "_select_all")]], {
+        updateCheckboxGroupInput(session, id, selected = pipeline_step_sample_candidates(current_project(), targets_only))
+      }, ignoreInit = TRUE)
+      observeEvent(input[[paste0(id, "_clear")]], {
+        updateCheckboxGroupInput(session, id, selected = character(0))
+      }, ignoreInit = TRUE)
+    })
+  }
 
   observeEvent(input$run_fastqc, {
     trimmed <- isTRUE(input$fastqc_use_trimmed)
