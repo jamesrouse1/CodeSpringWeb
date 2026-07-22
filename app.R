@@ -3848,7 +3848,7 @@ genome_browser_comparison_navigation <- function(result_dir, project = NULL, max
 # Read a bounded set of intervals for the individual CUT&RUN peak browser.  The
 # complete BED/narrowPeak file is still loaded into IGV; this only bounds the
 # menu so a very large peak set cannot make the Results Explorer unresponsive.
-cutrun_individual_peak_navigation <- function(path, max_peaks = 5000L, scan_limit = 250000L) {
+cutrun_individual_peak_navigation <- function(path, max_peaks = 1000L, scan_limit = 20000L) {
   empty <- list(peaks = setNames(character(0), character(0)), total = 0L, shown = 0L)
   if (!nzchar(path) || !file.exists(path) || file_size_for(path) <= 0) return(empty)
   path <- normalizePath(path, winslash = "/", mustWork = TRUE)
@@ -3861,9 +3861,8 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 5000L, scan_limi
     if (identical(cached$signature, signature)) return(cached$value)
   }
 
-  # Peak files are generally chromosome ordered. Scan the full practical range
-  # before retaining the top menu choices so "strongest" is meaningful rather
-  # than merely the first genomic intervals in the file.
+  # Keep initial browser rendering responsive: scan a bounded prefix, rank it
+  # by caller signal, then expose only the strongest intervals in the menu.
   peaks <- safe_read_result_table(path, scan_limit)
   if (!NROW(peaks) || !all(c("chrom", "start", "end") %in% names(peaks))) {
     value <- empty
@@ -3970,6 +3969,21 @@ cutrun_browser_signal_modes <- function(catalog, samples) {
   modes <- if (!length(by_sample)) "signal" else if (length(by_sample) == 1L) by_sample[[1]] else Reduce(intersect, by_sample)
   if (!length(modes)) modes <- unique(unlist(by_sample, use.names = FALSE))
   c(intersect(c("spikein", "cpm", "raw", "signal"), modes), setdiff(modes, c("spikein", "cpm", "raw", "signal")))
+}
+
+cutrun_browser_signal_modes_for_peak_call <- function(signal_modes, tool, parameters) {
+  tool <- trimws(as.character(tool %||% ""))
+  parameters <- tolower(trimws(as.character(parameters %||% "")))
+  if (identical(tool, "SEACR")) {
+    preferred <- if (grepl("spike-in", parameters, fixed = TRUE)) "spikein" else if (grepl("cpm", parameters, fixed = TRUE)) "cpm" else if (grepl("raw", parameters, fixed = TRUE)) "raw" else signal_modes
+    available <- intersect(preferred, signal_modes)
+    return(if (length(available)) available else signal_modes)
+  }
+  if (identical(tool, "MACS2")) {
+    available <- intersect(c("cpm", "raw"), signal_modes)
+    return(if (length(available)) available else signal_modes)
+  }
+  signal_modes
 }
 
 genome_browser_preferred_signal_rows <- function(project, catalog, samples, metadata = data.frame()) {
@@ -11129,7 +11143,7 @@ server <- function(input, output, session) {
     samples <- unique(as.character(catalog$sample))
     design_order <- project_samples(p)
     samples <- unique(c(design_order[design_order %in% samples], sort(setdiff(samples, design_order))))
-    controls <- list(selectInput("genome_browser_mode", "Track selection", choices = mode_choices, selected = mode, selectize = FALSE))
+    controls <- list(selectInput("genome_browser_mode", "Browser view", choices = mode_choices, selected = mode, selectize = FALSE))
     if (identical(mode, "cutrun_peak") && has_cutrun_peaks) {
       target_samples <- unique(as.character(catalog$sample[catalog$kind == "peaks"]))
       target_samples <- unique(c(design_order[design_order %in% target_samples], sort(setdiff(target_samples, design_order))))
@@ -11141,7 +11155,8 @@ server <- function(input, output, session) {
       parameter_rows <- parameter_rows[order(parameter_rows$parameters, parameter_rows$path), , drop = FALSE]
       parameter_choices <- stats::setNames(parameter_rows$path, make.unique(parameter_rows$parameters, sep = " — "))
       peak_path <- selected_choice(input$genome_browser_cutrun_parameters, parameter_choices, parameter_rows$path[[1]])
-      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 5000L)
+      selected_parameters <- parameter_rows$parameters[match(peak_path, parameter_rows$path)] %||% ""
+      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 1000L)
       peak_loci <- c("Choose a peak..." = "", navigation$peaks)
       selected_locus <- as.character(input$genome_browser_cutrun_peak %||% "")
       if (!selected_locus %in% unname(peak_loci)) selected_locus <- unname(peak_loci)[[min(2L, length(peak_loci))]] %||% ""
@@ -11149,26 +11164,13 @@ server <- function(input, output, session) {
       signal_samples <- unique(c(target_sample, if (nzchar(matched_igg)) matched_igg))
       signal_modes <- cutrun_browser_signal_modes(catalog, signal_samples)
       requested_normalization <- cutrun_alignment_values(p, target_sample)[["normalization_mode"]] %||% ""
-      default_signal_mode <- if (identical(requested_normalization, "spikein") && "spikein" %in% signal_modes) "spikein" else if ("cpm" %in% signal_modes) "cpm" else signal_modes[[1]]
+      signal_modes <- cutrun_browser_signal_modes_for_peak_call(signal_modes, selected_tool, selected_parameters)
+      default_signal_mode <- if (identical(selected_tool, "MACS2") && "cpm" %in% signal_modes) "cpm" else if (identical(requested_normalization, "spikein") && "spikein" %in% signal_modes) "spikein" else signal_modes[[1]]
       selected_signal_mode <- selected_choice(input$genome_browser_cutrun_signal_normalization, signal_modes, default_signal_mode)
       controls <- c(controls, list(
         selectInput(
           "genome_browser_cutrun_sample", "Target sample",
           choices = target_samples, selected = target_sample, selectize = FALSE
-        ),
-        if (length(navigation$peaks)) selectizeInput(
-          "genome_browser_cutrun_peak", "Peak interval",
-          choices = peak_loci, selected = selected_locus,
-          options = list(
-            placeholder = "Strongest called peaks first",
-            maxOptions = 5000L,
-            dropdownParent = "body"
-          )
-        ) else div(class = "muted small-note", "This peak file contains no called intervals."),
-        selectInput(
-          "genome_browser_cutrun_signal_normalization", "Signal normalization",
-          choices = stats::setNames(signal_modes, vapply(signal_modes, cutrun_browser_signal_mode_label, character(1))),
-          selected = selected_signal_mode, selectize = FALSE
         ),
         selectInput(
           "genome_browser_cutrun_tool", "Peak-calling tool",
@@ -11178,10 +11180,24 @@ server <- function(input, output, session) {
           "genome_browser_cutrun_parameters", "Parameters",
           choices = parameter_choices, selected = peak_path, selectize = FALSE
         ),
+        selectInput(
+          "genome_browser_cutrun_signal_normalization", "Signal normalization",
+          choices = stats::setNames(signal_modes, vapply(signal_modes, cutrun_browser_signal_mode_label, character(1))),
+          selected = selected_signal_mode, selectize = FALSE
+        ),
+        if (length(navigation$peaks)) selectizeInput(
+          "genome_browser_cutrun_peak", "Peak interval",
+          choices = peak_loci, selected = selected_locus,
+          options = list(
+            placeholder = "Strongest called peaks first",
+            maxOptions = 1000L,
+            dropdownParent = "body"
+          )
+        ) else div(class = "muted small-note", "This peak file contains no called intervals."),
         div(
           class = "muted small-note",
           if (nzchar(matched_igg)) paste0("Matched IgG: ", matched_igg, ".") else "No matched IgG was found in the CUT&RUN design.",
-          if (navigation$total > navigation$shown) paste0(" Menu shows the strongest ", format(navigation$shown, big.mark = ","), " of ", format(navigation$total, big.mark = ","), " called peaks; the complete file is loaded in IGV.") else ""
+          if (navigation$total > navigation$shown) paste0(" Menu shows the strongest ", format(navigation$shown, big.mark = ","), " of ", format(navigation$total, big.mark = ","), " called peaks from a fast scan; the complete file is loaded in IGV.") else ""
         ),
         div(class = "muted small-note", "Target is above IgG; their signal tracks use the same y-axis scale, and the selected peak-call file is the bottom track.")
       ))
@@ -11307,13 +11323,15 @@ server <- function(input, output, session) {
       peak_rows <- peak_rows[peak_rows$tool == selected_tool, , drop = FALSE]
       peak_rows <- peak_rows[order(peak_rows$parameters, peak_rows$path), , drop = FALSE]
       peak_path <- selected_choice(input$genome_browser_cutrun_parameters, peak_rows$path, peak_rows$path[[1]])
+      selected_parameters <- peak_rows$parameters[match(peak_path, peak_rows$path)] %||% ""
       peak_row <- peak_rows[match(peak_path, peak_rows$path), , drop = FALSE]
       matched_igg <- cutrun_control_sample_for(p, target_sample)
       selected_samples <- c(target_sample, if (nzchar(matched_igg)) matched_igg)
       selected_samples <- unique(selected_samples[selected_samples %in% unique(catalog$sample)])
       signal_modes <- cutrun_browser_signal_modes(catalog, selected_samples)
       requested_normalization <- cutrun_alignment_values(p, target_sample)[["normalization_mode"]] %||% ""
-      default_signal_mode <- if (identical(requested_normalization, "spikein") && "spikein" %in% signal_modes) "spikein" else if ("cpm" %in% signal_modes) "cpm" else signal_modes[[1]]
+      signal_modes <- cutrun_browser_signal_modes_for_peak_call(signal_modes, selected_tool, selected_parameters)
+      default_signal_mode <- if (identical(selected_tool, "MACS2") && "cpm" %in% signal_modes) "cpm" else if (identical(requested_normalization, "spikein") && "spikein" %in% signal_modes) "spikein" else signal_modes[[1]]
       selected_signal_mode <- selected_choice(input$genome_browser_cutrun_signal_normalization, signal_modes, default_signal_mode)
       tracks <- cutrun_browser_signal_rows(catalog, selected_samples, selected_signal_mode)
       if (NROW(tracks)) {
@@ -11329,7 +11347,7 @@ server <- function(input, output, session) {
         tracks <- rbind(tracks, peak_row)
         selected_peak_label <- peak_row$label[[1]]
       }
-      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 5000L)
+      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 1000L)
       comparison_default_locus <- if (length(navigation$peaks)) unname(navigation$peaks)[[1]] else ""
     } else if (comparison_mode) {
       requested_comparison <- if (nzchar(as.character(comparison_override %||% ""))) comparison_override else input$genome_browser_comparison

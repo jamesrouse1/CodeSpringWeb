@@ -227,6 +227,11 @@ assert(
   "individual browser offers matched target/IgG normalization modes rather than unrelated tracks"
 )
 assert(
+  identical(app_env$cutrun_browser_signal_modes_for_peak_call(c("spikein", "cpm", "raw"), "SEACR", "Spike-in-scaled track / SEACR non / stringent"), "spikein") &&
+    identical(app_env$cutrun_browser_signal_modes_for_peak_call(c("spikein", "cpm", "raw"), "MACS2", "narrow peaks; q ≤ 0.01"), c("cpm", "raw")),
+  "individual browser derives available signal modes from the selected peak-calling method"
+)
+assert(
   grepl("cutrun_peak_mode", server_source, fixed = TRUE) &&
     grepl("cutrun_control_sample_for(p, target_sample)", server_source, fixed = TRUE),
   "CUT&RUN individual browser mode pairs each target with its matched IgG"
