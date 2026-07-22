@@ -3353,6 +3353,51 @@ cutrun_seacr_frip_table <- function(project) {
   do.call(rbind, rows)
 }
 
+cutrun_seacr_peak_summary_table <- function(project) {
+  design <- cutrun_target_design(project, include_controls = FALSE)
+  frip <- cutrun_seacr_frip_table(project)
+  samples <- if (NROW(design) && "sample" %in% names(design)) as.character(design$sample) else if (NROW(frip) && "sample" %in% names(frip)) unique(as.character(frip$sample)) else character(0)
+  samples <- unique(trimws(samples))
+  samples <- samples[nzchar(samples)]
+  if (!length(samples)) return(data.frame())
+
+  out <- data.frame(Sample = samples, stringsAsFactors = FALSE, check.names = FALSE)
+  if (NROW(design) && "sample" %in% names(design)) {
+    design <- design[match(samples, as.character(design$sample)), , drop = FALSE]
+    metadata <- c(Model = "model", `Cell type` = "cell_type", Mark = "target", Condition = "condition", Replicate = "replicate")
+    for (label in names(metadata)) {
+      column <- metadata[[label]]
+      if (column %in% names(design)) out[[label]] <- as.character(design[[column]])
+    }
+  }
+  out[["IgG control"]] <- vapply(samples, function(sample) cutrun_control_sample_for(project, sample), character(1))
+
+  if (NROW(frip) && all(c("sample", "seacr_run", "peak_count") %in% names(frip))) {
+    runs <- sort(unique(trimws(as.character(frip$seacr_run))))
+    runs <- runs[nzchar(runs)]
+    for (run in runs) {
+      values <- vapply(samples, function(sample) {
+        hit <- frip[trimws(as.character(frip$sample)) == sample & trimws(as.character(frip$seacr_run)) == run, , drop = FALSE]
+        if (!NROW(hit)) return(NA_character_)
+        as.character(tail(hit$peak_count, 1))
+      }, character(1))
+      out[[paste0("SEACR Peaks: ", run)]] <- values
+    }
+  }
+
+  alignment <- cutrun_alignment_summary_table(project)
+  alignment_columns <- c(`E. coli Mapped Reads` = "spikein_mapped_reads", `Spike-in Scale Factor` = "spikein_scale_factor", `Mapped Reads` = "mapped_reads", `Deduplicated Reads` = "deduplicated_reads", `Signal Fragments` = "fragments_used_for_signal")
+  if (NROW(alignment) && "sample" %in% names(alignment)) {
+    for (label in names(alignment_columns)) {
+      column <- alignment_columns[[label]]
+      if (!column %in% names(alignment)) next
+      index <- match(samples, trimws(as.character(alignment$sample)))
+      out[[label]] <- as.character(alignment[[column]][index])
+    }
+  }
+  out
+}
+
 cutrun_peak_qc_summary_table <- function(project) {
   root <- file.path(project$data_dir, "cutrun_peak_qc")
   paths <- if (dir.exists(root)) list.files(root, pattern = "^cutrun_peak_qc_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
@@ -4408,6 +4453,9 @@ cutrun_results_explorer_ui <- function() {
                 br(),
                 uiOutput("cutrun_peak_qc_cards"),
                 div(class = "cutrun-chart-card", plotOutput("cutrun_frip_plot", height = "340px")),
+                div(class = "cutrun-section-heading", tags$h4("SEACR peak summary by method"), tags$p("One row per target sample. Peak-count columns are added or removed automatically as SEACR method folders are created or deleted."), downloadButton("download_cutrun_seacr_peak_summary", "Download summary")),
+                table_output("cutrun_seacr_peak_summary"),
+                br(),
                 div(class = "cutrun-section-heading", tags$h4("SEACR FRiP summary"), downloadButton("download_cutrun_frip", "Download FRiP")),
                 table_output("cutrun_frip_summary"),
                 br(),
@@ -11294,6 +11342,10 @@ server <- function(input, output, session) {
   output$cutrun_frip_summary <- render_csl_table({
     cutrun_seacr_frip_table(current_project())
   }, page_length = 50)
+  output$cutrun_seacr_peak_summary <- render_csl_table({
+    progress_refresh()
+    cutrun_seacr_peak_summary_table(current_project())
+  }, page_length = 50, scroll_y = "520px")
   output$cutrun_frip_plot <- renderPlot({
     progress_refresh()
     df <- cutrun_seacr_frip_table(current_project())
@@ -11554,6 +11606,10 @@ server <- function(input, output, session) {
   output$download_cutrun_frip <- downloadHandler(
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_seacr_frip.tsv"),
     content = function(file) utils::write.table(cutrun_seacr_frip_table(current_project()), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
+  )
+  output$download_cutrun_seacr_peak_summary <- downloadHandler(
+    filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_seacr_peak_summary.tsv"),
+    content = function(file) utils::write.table(cutrun_seacr_peak_summary_table(current_project()), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
   )
   output$download_cutrun_seacr <- downloadHandler(
     filename = function() {
