@@ -207,6 +207,13 @@ assert(
     identical(individual_navigation$total, 3L) && identical(individual_navigation$shown, 2L),
   "individual CUT&RUN peak navigation exposes bounded peak choices ordered by signal while retaining total peak count"
 )
+selected_peak_track <- app_env$genome_browser_selected_peak_bed(chip_project, "chr1:301-450", "selected")
+selected_peak_table <- app_env$safe_read_result_table(selected_peak_track, 10L)
+assert(
+  NROW(selected_peak_table) == 1L && identical(selected_peak_table$start[[1]], 300L) && identical(selected_peak_table$end[[1]], 450L),
+  "individual CUT&RUN browser uses a one-interval annotation track instead of loading the complete peak BED"
+)
+unlink(selected_peak_track)
 browser_peak_root <- file.path(root, "seacr", "spikein_non_stringent", "target")
 dir.create(browser_peak_root, recursive = TRUE)
 browser_peak_catalog <- data.frame(

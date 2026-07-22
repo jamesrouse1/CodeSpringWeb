@@ -4077,6 +4077,24 @@ register_genome_browser_track <- function(session, project, path, index = 1L) {
   session$registerDataObj(key, list(path = path, content_type = content_type), genome_browser_range_response)
 }
 
+genome_browser_selected_peak_bed <- function(project, locus, label = "Selected peak") {
+  locus <- trimws(as.character(locus %||% ""))
+  parts <- regmatches(locus, regexec("^([^:[:space:]]+):([0-9,]+)-([0-9,]+)$", locus, perl = TRUE))[[1]]
+  if (length(parts) != 4L) return("")
+  start <- suppressWarnings(as.numeric(gsub(",", "", parts[[3]], fixed = TRUE)))
+  end <- suppressWarnings(as.numeric(gsub(",", "", parts[[4]], fixed = TRUE)))
+  if (!is.finite(start) || !is.finite(end) || start < 1 || end < start) return("")
+  cache_dir <- file.path(project$data_dir, ".codespring_igv")
+  dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+  cache_key <- clean_name(paste(label, locus, sep = "_"), "selected_peak")
+  path <- file.path(cache_dir, paste0(cache_key, ".bed"))
+  utils::write.table(
+    data.frame(parts[[2]], max(0, start - 1), end, label, 1000L, "+", stringsAsFactors = FALSE),
+    path, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE
+  )
+  path
+}
+
 genome_browser_ui <- function() {
   div(class = "codespring-genome-browser-controls",
   br(),
@@ -11204,9 +11222,9 @@ server <- function(input, output, session) {
         div(
           class = "muted small-note",
           if (nzchar(matched_igg)) paste0("Matched IgG: ", matched_igg, ".") else "No matched IgG was found in the CUT&RUN design.",
-          if (navigation$total > navigation$shown) paste0(" Menu shows ", format(navigation$shown, big.mark = ","), " high-signal candidate peaks from a fast preview of ", format(navigation$total, big.mark = ","), " called peaks; the complete file is loaded in IGV.") else ""
+          if (navigation$total > navigation$shown) paste0(" Menu shows ", format(navigation$shown, big.mark = ","), " high-signal candidate peaks from a fast preview of ", format(navigation$total, big.mark = ","), " called peaks. IGV displays only the selected interval, not the full peak file.") else ""
         ),
-        div(class = "muted small-note", "Target is above IgG; their signal tracks use the same y-axis scale, and the selected peak-call file is the bottom track.")
+        div(class = "muted small-note", "Target is above IgG; their signal tracks use the same y-axis scale, and the selected peak interval is the bottom track.")
       ))
     } else if (identical(mode, "comparison") && NROW(comparisons)) {
       comparison_choices <- stats::setNames(comparisons$id, make.unique(comparisons$label, sep = " — "))
@@ -11349,14 +11367,25 @@ server <- function(input, output, session) {
           paste(tracks$sample, "matched IgG signal", sep = " — ")
         )
       }
-      if (NROW(peak_row)) {
-        peak_row$kind <- "selected_peak"
-        peak_row$label <- paste(target_sample, "called peaks", sep = " — ")
-        tracks <- rbind(tracks, peak_row)
-        selected_peak_label <- peak_row$label[[1]]
-      }
       navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 250L)
-      comparison_default_locus <- if (length(navigation$peaks)) unname(navigation$peaks)[[1]] else ""
+      selected_peak_locus <- trimws(as.character(locus_override %||% input$genome_browser_cutrun_peak %||% ""))
+      if (!nzchar(selected_peak_locus) && length(navigation$peaks)) selected_peak_locus <- unname(navigation$peaks)[[1]]
+      comparison_default_locus <- selected_peak_locus
+      if (NROW(peak_row) && nzchar(selected_peak_locus)) {
+        selected_peak_path <- genome_browser_selected_peak_bed(
+          p,
+          selected_peak_locus,
+          paste(target_sample, selected_tool, "selected peak", sep = " — ")
+        )
+        if (nzchar(selected_peak_path)) {
+          peak_row$kind <- "selected_peak"
+          peak_row$format <- "bed"
+          peak_row$path <- selected_peak_path
+          peak_row$label <- paste(target_sample, "selected peak", sep = " — ")
+          tracks <- rbind(tracks, peak_row)
+          selected_peak_label <- peak_row$label[[1]]
+        }
+      }
     } else if (comparison_mode) {
       requested_comparison <- if (nzchar(as.character(comparison_override %||% ""))) comparison_override else input$genome_browser_comparison
       comparison_id <- selected_choice(requested_comparison, comparisons$id, comparisons$id[[1]])
