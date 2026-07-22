@@ -3398,6 +3398,34 @@ cutrun_seacr_peak_summary_table <- function(project) {
   out
 }
 
+cutrun_seacr_peak_method <- function(path, root) {
+  rel <- sub(paste0("^", gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", normalizePath(root, winslash = "/", mustWork = FALSE), perl = TRUE), "/?"), "", normalizePath(path, winslash = "/", mustWork = FALSE))
+  parts <- strsplit(rel, "/", fixed = TRUE)[[1]]
+  candidate <- if (length(parts) >= 3) parts[[1]] else "legacy"
+  if (grepl("^((spikein|cpm)_non|raw_norm|norm|non)_(stringent|relaxed)$", candidate)) candidate else "legacy"
+}
+
+cutrun_seacr_method_label <- function(method) {
+  labels <- c(
+    spikein_non_stringent = "Spike-in-scaled track / SEACR non / stringent",
+    spikein_non_relaxed = "Spike-in-scaled track / SEACR non / relaxed",
+    cpm_non_stringent = "CPM track / SEACR non / stringent",
+    cpm_non_relaxed = "CPM track / SEACR non / relaxed",
+    raw_norm_stringent = "Raw track / SEACR norm / stringent",
+    raw_norm_relaxed = "Raw track / SEACR norm / relaxed",
+    legacy = "Legacy SEACR output"
+  )
+  unname(labels[[method]] %||% method)
+}
+
+cutrun_seacr_peak_total <- function(path) {
+  summary_path <- sub("\\.(stringent|relaxed)\\.bed$", "_seacr_summary.txt", path)
+  values <- metric_file_to_named_list(summary_path)
+  total <- suppressWarnings(as.numeric(values[["peak_count"]] %||% NA_character_))
+  if (is.finite(total)) return(total)
+  length(tryCatch(readLines(path, warn = FALSE), error = function(e) character(0)))
+}
+
 cutrun_peak_qc_summary_table <- function(project) {
   root <- file.path(project$data_dir, "cutrun_peak_qc")
   paths <- if (dir.exists(root)) list.files(root, pattern = "^cutrun_peak_qc_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
@@ -4481,7 +4509,8 @@ cutrun_results_explorer_ui <- function() {
                     width = 9,
                     uiOutput("cutrun_seacr_peak_cards"),
                     div(class = "cutrun-section-heading", tags$h4("Selected SEACR peaks"), downloadButton("download_cutrun_seacr", "Download BED")),
-                    table_output("cutrun_seacr_peak_table")
+                    table_output("cutrun_seacr_peak_table"),
+                    tags$p(class = "muted small-note", "The browser preview displays at most the first 5,000 peaks for responsiveness. Download the BED to access every peak.")
                   )
                 )
               ),
@@ -11345,12 +11374,15 @@ server <- function(input, output, session) {
     if (!length(choices)) return(div(class = "empty-box", "No SEACR peak BED files were found yet."))
     paths <- unname(choices)
     root <- file.path(current_project()$data_dir, "seacr")
-    labels <- vapply(paths, function(path) {
-      rel <- sub(paste0("^", gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", normalizePath(root, winslash = "/", mustWork = FALSE), perl = TRUE), "/?"), "", normalizePath(path, winslash = "/", mustWork = FALSE))
-      rel
-    }, character(1))
-    friendly <- stats::setNames(paths, labels)
-    selectInput("cutrun_seacr_peak_file", "SEACR sample", choices = friendly, selected = selected_choice(input$cutrun_seacr_peak_file, paths, paths[[1]]), selectize = FALSE)
+    methods <- vapply(paths, cutrun_seacr_peak_method, character(1), root = root)
+    available_methods <- sort(unique(methods))
+    selected_method <- selected_choice(input$cutrun_seacr_peak_method, available_methods, available_methods[[1]])
+    method_paths <- paths[methods == selected_method]
+    labels <- vapply(method_paths, function(path) paste(basename(dirname(path)), basename(path), sep = " — "), character(1))
+    tagList(
+      selectInput("cutrun_seacr_peak_method", "SEACR method", choices = stats::setNames(available_methods, vapply(available_methods, cutrun_seacr_method_label, character(1))), selected = selected_method, selectize = FALSE),
+      selectInput("cutrun_seacr_peak_file", "SEACR sample", choices = stats::setNames(method_paths, labels), selected = selected_choice(input$cutrun_seacr_peak_file, method_paths, method_paths[[1]]), selectize = FALSE)
+    )
   })
   output$cutrun_seacr_peak_table <- render_csl_table({
     path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
@@ -11362,11 +11394,12 @@ server <- function(input, output, session) {
     path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
     if (!nzchar(path)) return(NULL)
     peaks <- safe_read_result_table(path, 5000)
+    total_peaks <- cutrun_seacr_peak_total(path)
     widths <- if (NROW(peaks) && all(c("start", "end") %in% names(peaks))) clean_metric_number(peaks$end) - clean_metric_number(peaks$start) else numeric(0)
     widths <- widths[is.finite(widths) & widths > 0]
     div(class = "cutrun-metric-grid compact",
         cutrun_metric_card("Sample", basename(dirname(path)), basename(path), "blue"),
-        cutrun_metric_card("Peaks shown", format_metric_value(NROW(peaks)), "Table preview limit: 5,000", "green"),
+        cutrun_metric_card("Total peaks", format_metric_value(total_peaks), "Preview shows up to 5,000", "green"),
         cutrun_metric_card("Median width", if (length(widths)) paste0(format_metric_value(stats::median(widths)), " bp") else "—", "Native SEACR regions", "gold"),
         cutrun_metric_card("File size", human_file_size(path), "BED output", "purple")
     )
