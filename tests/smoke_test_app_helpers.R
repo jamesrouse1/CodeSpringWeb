@@ -217,6 +217,15 @@ assert(
     any(grepl("Spike-in-scaled", browser_peak_rows$parameters, fixed = TRUE)),
   "CUT&RUN individual browser separates peak-calling tool from the selected parameter set"
 )
+browser_signal_catalog <- data.frame(
+  sample = c("target", "target", "igg", "igg"), kind = "signal", format = "bigwig", label = "signal",
+  path = c("/tmp/target_spikein.bw", "/tmp/target_CPM.bw", "/tmp/igg_CPM.bw", "/tmp/igg_raw.bw"),
+  stringsAsFactors = FALSE
+)
+assert(
+  identical(app_env$cutrun_browser_signal_modes(browser_signal_catalog, c("target", "igg")), "cpm"),
+  "individual browser offers matched target/IgG normalization modes rather than unrelated tracks"
+)
 assert(
   grepl("cutrun_peak_mode", server_source, fixed = TRUE) &&
     grepl("cutrun_control_sample_for(p, target_sample)", server_source, fixed = TRUE),
