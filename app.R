@@ -4904,9 +4904,10 @@ sample_retry_candidates <- function(progress_df, step) {
   sort(unique(as.character(hit$sample[retry_status & nzchar(as.character(hit$sample))])))
 }
 
-sample_retry_ui <- function(project, progress_df, step) {
+sample_retry_ui <- function(project, progress_df, step, samples_override = NULL) {
   if (!NROW(progress_df) || !"step" %in% names(progress_df) || !any(progress_df$step == step)) return(NULL)
-  samples <- sample_retry_candidates(progress_df, step)
+  samples <- if (is.null(samples_override)) sample_retry_candidates(progress_df, step) else sort(unique(as.character(samples_override)))
+  samples <- samples[nzchar(samples)]
   if (!length(samples)) {
     return(div(class = "sample-retry-zone complete", tags$strong("Incomplete/failed samples"), tags$span("None detected.")))
   }
@@ -10207,7 +10208,18 @@ server <- function(input, output, session) {
         sample_progress_step_ui(sample_progress_state(), this_step)
       })
       output[[tool_retry_ui_output_id(this_step)]] <- renderUI({
-        sample_retry_ui(current_project(), sample_progress_state(), this_step)
+        project <- current_project()
+        if (identical(this_step, "SEACR") && is_cutrun_project(project)) {
+          config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "spikein_non")
+          stringency <- selected_choice(tolower(input$cutrun_seacr_stringency %||% "stringent"), c("stringent", "relaxed"), "stringent")
+          samples <- pipeline_step_sample_candidates(project, targets_only = TRUE)
+          completed <- tryCatch(
+            completed_cutrun_seacr_samples(project, samples, config$norm, stringency, config$track),
+            error = function(e) character(0)
+          )
+          return(sample_retry_ui(project, sample_progress_state(), this_step, setdiff(samples, completed)))
+        }
+        sample_retry_ui(project, sample_progress_state(), this_step)
       })
       output[[tool_progress_output_id(this_step)]] <- render_csl_table({
         sample_progress_step_table(sample_progress_state(), this_step)
@@ -10302,7 +10314,7 @@ server <- function(input, output, session) {
   output$cutrun_bowtie2_samples_ui <- renderUI(step_sample_selector("cutrun_bowtie2_samples", "Targets and controls to align", "Bowtie2"))
   output$cutrun_seacr_samples_ui <- renderUI({
     p <- current_project()
-    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "spikein_non")
     norm <- config$norm
     track <- config$track
     stringency <- selected_choice(tolower(input$cutrun_seacr_stringency %||% "stringent"), c("stringent", "relaxed"), "stringent")
@@ -10474,7 +10486,7 @@ server <- function(input, output, session) {
   })
   observeEvent(input$run_cutrun_seacr, {
     samples <- input$cutrun_seacr_samples %||% character(0)
-    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "spikein_non")
     run_submission(
       "SEACR",
       submit_cutrun_seacr_jobs(current_project(), config$norm, input$cutrun_seacr_stringency %||% "stringent", samples, config$track),
@@ -10484,7 +10496,7 @@ server <- function(input, output, session) {
   })
   observeEvent(input$run_cutrun_dedup_sensitivity, {
     samples <- input$cutrun_dedup_sensitivity_samples %||% character(0)
-    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "spikein_non")
     run_submission(
       "SEACR sensitivity",
       submit_cutrun_dedup_sensitivity_jobs(
@@ -10496,7 +10508,7 @@ server <- function(input, output, session) {
     )
   })
   observeEvent(input$run_cutrun_peakqc, {
-    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "spikein_non")
     run_submission(
       "Peak QC",
       submit_cutrun_peakqc_job(current_project(), config$norm, input$cutrun_seacr_stringency %||% "stringent", config$track),
@@ -10507,7 +10519,7 @@ server <- function(input, output, session) {
     reference <- input$cutrun_diffbind_reference %||% ""
     support <- input$cutrun_diffbind_min_replicates %||% 1
     comparisons <- input$cutrun_diffbind_jobs %||% character(0)
-    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "cpm_non")
+    config <- cutrun_seacr_config(input$cutrun_seacr_config %||% "spikein_non")
     run_submission(
       "Differential Peaks",
       submit_cutrun_diffbind_jobs(current_project(), reference, comparisons, support, config$norm, input$cutrun_seacr_stringency %||% "stringent", config$track),
