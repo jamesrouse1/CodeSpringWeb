@@ -189,6 +189,24 @@ assert(all(c("cell_type", "mark", "target_class", "condition", "replicate", "con
 cutrun_targets <- cutrun_example$target_class != "control"
 assert(all(nzchar(cutrun_example$control_sample[cutrun_targets])), "CUT&RUN example assigns every target to an IgG control")
 
+individual_peak_file <- file.path(root, "individual_sample.stringent.bed")
+writeLines(c(
+  "chr1\t100\t200\t10",
+  "chr1\t300\t450\t30",
+  "chr2\t500\t600\t20"
+), individual_peak_file)
+individual_navigation <- app_env$cutrun_individual_peak_navigation(individual_peak_file, max_peaks = 2L)
+assert(
+  identical(unname(individual_navigation$peaks[[1]]), "chr1:301-450") &&
+    identical(individual_navigation$total, 3L) && identical(individual_navigation$shown, 2L),
+  "individual CUT&RUN peak navigation exposes bounded peak choices ordered by signal while retaining total peak count"
+)
+assert(
+  grepl("cutrun_peak_mode", server_source, fixed = TRUE) &&
+    grepl("cutrun_control_sample_for(p, target_sample)", server_source, fixed = TRUE),
+  "CUT&RUN individual browser mode pairs each target with its matched IgG"
+)
+
 atac_project <- chip_project
 atac_project$analysis_key <- "atac"
 atac_project$analysis <- "ATAC-seq"
