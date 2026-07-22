@@ -23,6 +23,11 @@ assert(
     grepl("session$onFlushed(function()", server_source, fixed = TRUE),
   "genome browser loads only after its controls have rendered on tab open"
 )
+assert(
+  grepl("cutrun_browser_settings_stable <- shiny::debounce", server_source, fixed = TRUE) &&
+    grepl("codespring-igv-locus", server_source, fixed = TRUE),
+  "CUT&RUN peak selection navigates one IGV instance instead of rebuilding it repeatedly"
+)
 assert(any(grepl("codespringIgvLoadPromise", runtime_text, fixed = TRUE)), "IGV replacements are serialized so repeated reload events cannot create duplicate browsers")
 assert(grepl("comparison_default_locus", server_source, fixed = TRUE) && grepl("locus_override = top_peak", server_source, fixed = TRUE), "each differential comparison defaults IGV to its most significant ranked peak")
 assert(app_env$path_is_within(app_env$APP_HOME, app_env$CURRENT_HOME), "private app state is derived from the effective Unix user's home")

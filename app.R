@@ -11121,10 +11121,16 @@ server <- function(input, output, session) {
     progress_refresh()
     peak_signal_track_table(current_project())
   }, page_length = 50, scroll_y = "600px")
-  # Do not construct IGV while its tab is merely opened.  It can be expensive
-  # for a project with many bigWigs, and it should reflect the user's selected
-  # caller and normalization rather than an automatic all-track preview.
+  # Load one settled browser configuration, then navigate it in place.  Rebuilding
+  # IGV on every dynamic control update makes the Results Explorer appear busy.
   genome_browser_loaded <- reactiveVal(FALSE)
+  cutrun_browser_settings <- reactive(list(
+    sample = input$genome_browser_cutrun_sample %||% "",
+    tool = input$genome_browser_cutrun_tool %||% "",
+    parameters = input$genome_browser_cutrun_parameters %||% "",
+    normalization = input$genome_browser_cutrun_signal_normalization %||% ""
+  ))
+  cutrun_browser_settings_stable <- shiny::debounce(cutrun_browser_settings, 350L)
   output$genome_browser_controls_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
@@ -11456,14 +11462,11 @@ server <- function(input, output, session) {
     locus <- trimws(as.character(input$genome_browser_cutrun_peak %||% ""))
     if (!nzchar(locus)) return(invisible(NULL))
     updateTextInput(session, "genome_browser_locus", value = locus)
-    if (isTRUE(genome_browser_loaded())) send_genome_browser(locus_override = locus)
+    if (isTRUE(genome_browser_loaded())) {
+      session$sendCustomMessage("codespring-igv-locus", list(locus = locus))
+    }
   }, ignoreInit = TRUE)
-  observeEvent(list(
-    input$genome_browser_cutrun_sample,
-    input$genome_browser_cutrun_tool,
-    input$genome_browser_cutrun_parameters,
-    input$genome_browser_cutrun_signal_normalization
-  ), {
+  observeEvent(cutrun_browser_settings_stable(), {
     if (is_cutrun_project(current_project()) && isTRUE(genome_browser_loaded())) {
       send_genome_browser()
     }
