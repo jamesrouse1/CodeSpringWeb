@@ -3848,7 +3848,7 @@ genome_browser_comparison_navigation <- function(result_dir, project = NULL, max
 # Read a bounded set of intervals for the individual CUT&RUN peak browser.  The
 # complete BED/narrowPeak file is still loaded into IGV; this only bounds the
 # menu so a very large peak set cannot make the Results Explorer unresponsive.
-cutrun_individual_peak_navigation <- function(path, max_peaks = 1000L, scan_limit = 20000L) {
+cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit = 1000L) {
   empty <- list(peaks = setNames(character(0), character(0)), total = 0L, shown = 0L)
   if (!nzchar(path) || !file.exists(path) || file_size_for(path) <= 0) return(empty)
   path <- normalizePath(path, winslash = "/", mustWork = TRUE)
@@ -8982,7 +8982,9 @@ ui <- fluidPage(
   tags$head(
     tags$title("CodeSpringApp"),
     tags$style(HTML(app_css)),
-    tags$script(src = "https://cdn.jsdelivr.net/npm/igv@3.0.2/dist/igv.min.js"),
+    # Bundle IGV with the app: a browser on a cluster laptop should not need a
+    # separate internet request before the local Shiny genome browser can load.
+    tags$script(src = "genome-viewer.min.js"),
     tags$script(HTML("
       function cslFormatElapsed(total) {
         total = Math.max(0, Math.floor(total || 0));
@@ -11119,6 +11121,10 @@ server <- function(input, output, session) {
     progress_refresh()
     peak_signal_track_table(current_project())
   }, page_length = 50, scroll_y = "600px")
+  # Do not construct IGV while its tab is merely opened.  It can be expensive
+  # for a project with many bigWigs, and it should reflect the user's selected
+  # caller and normalization rather than an automatic all-track preview.
+  genome_browser_loaded <- reactiveVal(FALSE)
   output$genome_browser_controls_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
@@ -11156,7 +11162,7 @@ server <- function(input, output, session) {
       parameter_choices <- stats::setNames(parameter_rows$path, make.unique(parameter_rows$parameters, sep = " — "))
       peak_path <- selected_choice(input$genome_browser_cutrun_parameters, parameter_choices, parameter_rows$path[[1]])
       selected_parameters <- parameter_rows$parameters[match(peak_path, parameter_rows$path)] %||% ""
-      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 1000L)
+      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 250L)
       peak_loci <- c("Choose a peak..." = "", navigation$peaks)
       selected_locus <- as.character(input$genome_browser_cutrun_peak %||% "")
       if (!selected_locus %in% unname(peak_loci)) selected_locus <- unname(peak_loci)[[min(2L, length(peak_loci))]] %||% ""
@@ -11190,14 +11196,14 @@ server <- function(input, output, session) {
           choices = peak_loci, selected = selected_locus,
           options = list(
             placeholder = "Strongest called peaks first",
-            maxOptions = 1000L,
+            maxOptions = 250L,
             dropdownParent = "body"
           )
         ) else div(class = "muted small-note", "This peak file contains no called intervals."),
         div(
           class = "muted small-note",
           if (nzchar(matched_igg)) paste0("Matched IgG: ", matched_igg, ".") else "No matched IgG was found in the CUT&RUN design.",
-          if (navigation$total > navigation$shown) paste0(" Menu shows the strongest ", format(navigation$shown, big.mark = ","), " of ", format(navigation$total, big.mark = ","), " called peaks from a fast scan; the complete file is loaded in IGV.") else ""
+          if (navigation$total > navigation$shown) paste0(" Menu shows ", format(navigation$shown, big.mark = ","), " high-signal candidate peaks from a fast preview of ", format(navigation$total, big.mark = ","), " called peaks; the complete file is loaded in IGV.") else ""
         ),
         div(class = "muted small-note", "Target is above IgG; their signal tracks use the same y-axis scale, and the selected peak-call file is the bottom track.")
       ))
@@ -11347,7 +11353,7 @@ server <- function(input, output, session) {
         tracks <- rbind(tracks, peak_row)
         selected_peak_label <- peak_row$label[[1]]
       }
-      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 1000L)
+      navigation <- cutrun_individual_peak_navigation(peak_path, max_peaks = 250L)
       comparison_default_locus <- if (length(navigation$peaks)) unname(navigation$peaks)[[1]] else ""
     } else if (comparison_mode) {
       requested_comparison <- if (nzchar(as.character(comparison_override %||% ""))) comparison_override else input$genome_browser_comparison
@@ -11455,7 +11461,7 @@ server <- function(input, output, session) {
     locus <- trimws(as.character(input$genome_browser_cutrun_peak %||% ""))
     if (!nzchar(locus)) return(invisible(NULL))
     updateTextInput(session, "genome_browser_locus", value = locus)
-    send_genome_browser(locus_override = locus)
+    if (isTRUE(genome_browser_loaded())) send_genome_browser(locus_override = locus)
   }, ignoreInit = TRUE)
   observeEvent(input$genome_browser_comparison, {
     comparison_id <- as.character(input$genome_browser_comparison %||% "")
@@ -11479,10 +11485,14 @@ server <- function(input, output, session) {
       updateSelectizeInput(session, "genome_browser_gene", selected = "")
       updateSelectizeInput(session, "genome_browser_peak", selected = top_peak)
     }, once = TRUE)
-    send_genome_browser(comparison_override = comparison_id, samples_override = available, locus_override = top_peak)
+    if (isTRUE(genome_browser_loaded())) {
+      send_genome_browser(comparison_override = comparison_id, samples_override = available, locus_override = top_peak)
+    }
   }, ignoreInit = TRUE)
-  observeEvent(input$load_genome_browser, send_genome_browser(), ignoreInit = TRUE)
-  observeEvent(input$genome_browser_ready, send_genome_browser(), ignoreInit = TRUE)
+  observeEvent(input$load_genome_browser, {
+    genome_browser_loaded(TRUE)
+    send_genome_browser()
+  }, ignoreInit = TRUE)
   output$atac_diffbind_dir_ui <- renderUI({
     progress_refresh(); root <- file.path(current_project()$data_dir, "diffbind"); dirs <- if (dir.exists(root)) list.dirs(root, recursive = FALSE, full.names = TRUE) else character(0); dirs <- dirs[vapply(dirs, diffbind_comparison_complete, logical(1))]
     if (!length(dirs)) return(div(class = "empty-box", "No DiffBind comparison found yet.")); selectInput("atac_diffbind_dir", "Comparison", choices = stats::setNames(dirs, basename(dirs)), selected = selected_choice(input$atac_diffbind_dir, dirs, dirs[[1]]), selectize = FALSE)
