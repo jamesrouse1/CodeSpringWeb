@@ -3165,9 +3165,9 @@ sample_step_targets <- function(project, sample, step, raw_pairs = NULL, trimmed
       "Bowtie2" = file.path(data_dir, "bowtie2", sample, paste0(sample, "_alignment_summary.txt")),
       "SEACR" = {
         root <- file.path(data_dir, "seacr")
-        pattern <- paste0("^", gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", sample, perl = TRUE), "\\.(stringent|relaxed)\\.bed$")
+        pattern <- paste0("^", gsub("([][{}()+*^$|\\\\.?])", "\\\\\\1", sample, perl = TRUE), "_seacr_summary\\.txt$")
         hits <- if (dir.exists(root)) list.files(root, pattern = pattern, recursive = TRUE, full.names = TRUE) else character(0)
-        if (length(hits)) hits else file.path(root, sample, paste0(sample, ".stringent.bed"))
+        if (length(hits)) hits else file.path(root, sample, paste0(sample, "_seacr_summary.txt"))
       },
       "MACS2 (optional)" = {
         file.path(data_dir, "macs2", sample, paste0(sample, "_macs2_complete.txt"))
