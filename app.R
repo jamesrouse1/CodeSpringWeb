@@ -2283,6 +2283,7 @@ canonical_job_step <- function(x) {
     bowtie2 = "Bowtie2",
     seacr = "SEACR",
     macs2 = "MACS2 (optional)",
+    peakoverlap = "Peak Overlap",
     peakannotation = "Peak Annotation",
     diffbind = "Differential Peaks",
     differentialpeaks = "Differential Peaks",
@@ -2506,7 +2507,8 @@ tool_reference_summary <- function(project) {
       c("Tool", "SEACR", seacr_modules, "Recommended sparse CUT&RUN peak calling and FRiP QC", "Spike-in, CPM, or raw fragment bedGraphs and matched IgG/input control bedGraph", "With spike-in Bowtie2 normalization, the default SEACR non configuration uses spike-in-scaled tracks. The raw/norm configuration makes SEACR normalize the control internally. Each configuration is stored separately."),
       c("Tool", "Peak QC", "BEDTools module listed in CodeSpringLab script", "Consensus peaks, peak count matrix, and FRiP summary", "SEACR peak BED files and Bowtie2 BAM files", "Merges SEACR peaks across samples and counts fragments over consensus peaks."),
       c("Tool", "DiffBind/DESeq2", diffbind_modules, "Mark-specific CUT&RUN differential binding", "SEACR peaks, target BAMs, and automatically resolved E. coli spike-in BAMs", "Analyzes each cell type/mark separately and compares every non-reference condition with the selected reference. At least two biological replicates are required in each condition. The ATAC-like default admits a peak supported by one or more replicates; stricter consensus support is available under Advanced. Native SEACR widths are preserved with summits=FALSE; IgG BAMs are not subtracted again."),
-      c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01. Auto mode uses broad peaks for histone_broad targets and narrow peaks for histone_narrow or tf_or_other targets; a run-wide narrow or broad override remains available.")
+      c("Tool", "MACS2", macs2_modules, "Optional peak calling comparison", "Bowtie2 BAM and optional IgG/input control BAM", "Default q-value 0.01. Auto mode uses broad peaks for histone_broad targets and narrow peaks for histone_narrow or tf_or_other targets; a run-wide narrow or broad override remains available."),
+      c("Tool", "Shared peak overlap", "BEDTools 2.30.0", "Per-sample intersection of two selected peak caller/settings", "Completed SEACR and/or MACS2 peak files", "Writes the exact shared genomic intervals as a merged three-column BED. Output folders encode both selected caller/settings; a reciprocal-overlap threshold can be selected, with 0 meaning any shared base.")
     )
     out <- as.data.frame(do.call(rbind, rows), stringsAsFactors = FALSE)
     colnames(out) <- c("Type", "Name", "Version/reference", "Used for", "Input/reference", "Parameters/settings")
@@ -2543,6 +2545,7 @@ methods_sentence_for_step <- function(step, manifest_rows, project) {
     "Differential Peaks" = paste0(if (is_atac_project(project)) "Differential accessibility was tested on a MACS2 consensus peakset using DiffBind with DESeq2." else if (is_chip_project(project)) "Differential ChIP binding was tested with DiffBind using target-only MACS2 peaks and ChIP BAMs; matched inputs were applied during peak calling and were not counted as replicates." else "Differential CUT&RUN binding was tested separately by cell type and mark using DiffBind with DESeq2. Native SEACR intervals were preserved and spike-in BAMs were reused automatically when available.", ref_text, mode_text),
     "MACS2 Peaks" = paste0(if (is_chip_project(project)) "ChIP-seq peaks were called with MACS2 against explicitly matched input controls using paired- or single-end mode as appropriate." else "ATAC-seq peaks were called with MACS2 using Tn5-aware shifting and annotated with Homer.", ref_text, mode_text),
     "MACS2 (optional)" = paste0("Optional CUT&RUN peaks were called with MACS2.", ref_text, mode_text),
+    "Peak Overlap" = paste0("Per-sample shared peak BEDs were created by intersecting the selected completed peak caller/settings with BEDTools.", ref_text, mode_text),
     "STAR" = paste0("Reads were aligned with STAR using ", gencode_label(project), ".", ref_text, mode_text),
     "featureCounts" = paste0("Gene-level counts were quantified with featureCounts using the selected GTF annotation.", ref_text, mode_text),
     "DESeq2" = paste0("Differential expression analysis was performed with DESeq2.", mode_text),
@@ -2906,6 +2909,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         if (count_files(file.path(data_dir, "cutrun_peak_qc"), "^seacr_consensus_peaks\\.bed$") > 0) "Complete" else "Not started",
         if (file.exists(file.path(data_dir, "cutrun_diffbind", "_COMPLETE")) || count_files(file.path(data_dir, "cutrun_diffbind"), "^_COMPLETE$") > 0) "Complete" else "Not started",
         if (count_files(file.path(data_dir, "macs2"), "(narrowPeak|broadPeak|peaks\\.xls)$") > 0) "Complete" else "Not started",
+        if (count_files(file.path(data_dir, "peak_overlap"), "_overlap_peaks_summary\\.txt$") > 0) "Complete" else "Not started",
         peak_annotation_status(project, jobs)
       ),
       path = c(
@@ -2917,6 +2921,7 @@ project_status <- function(project, jobs = NULL, progress = NULL, active_states 
         file.path(data_dir, "cutrun_peak_qc"),
         file.path(data_dir, "cutrun_diffbind"),
         file.path(data_dir, "macs2"),
+        file.path(data_dir, "peak_overlap"),
         file.path(data_dir, "peak_annotation")
       ),
       stringsAsFactors = FALSE
@@ -3051,7 +3056,7 @@ rna_pipeline_order <- function() {
 }
 
 cutrun_pipeline_order <- function() {
-  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "Peak QC", "Differential Peaks", "MACS2 (optional)", "Peak Annotation")
+  c("Design matrix", "Cutadapt", "FastQC", "Bowtie2", "SEACR", "Peak QC", "Differential Peaks", "MACS2 (optional)", "Peak Overlap", "Peak Annotation")
 }
 
 atac_pipeline_order <- function() {
@@ -3397,6 +3402,24 @@ cutrun_seacr_peak_summary_table <- function(project) {
     if (any(!is.na(macs_counts) & nzchar(macs_counts))) out[["MACS2 Peaks"]] <- macs_counts
   }
 
+  overlap <- cutrun_peak_overlap_summary_table(project)
+  if (NROW(overlap) && all(c("Sample", "Overlap set", "Shared overlap peaks") %in% names(overlap))) {
+    overlap_sets <- sort(unique(trimws(as.character(overlap[["Overlap set"]]))))
+    overlap_sets <- overlap_sets[nzchar(overlap_sets)]
+    for (overlap_set in overlap_sets) {
+      values <- vapply(samples, function(sample) {
+        hit <- overlap[
+          trimws(as.character(overlap[["Sample"]])) == sample &
+            trimws(as.character(overlap[["Overlap set"]])) == overlap_set,
+          , drop = FALSE
+        ]
+        if (!NROW(hit)) return(NA_character_)
+        as.character(tail(hit[["Shared overlap peaks"]], 1))
+      }, character(1))
+      out[[paste0("Shared Peaks: ", overlap_set)]] <- values
+    }
+  }
+
   alignment <- cutrun_alignment_summary_table(project)
   alignment_columns <- c(`E. coli Mapped Reads` = "spikein_mapped_reads", `Spike-in Scale Factor` = "spikein_scale_factor", `Mapped Reads` = "mapped_reads", `Deduplicated Reads` = "deduplicated_reads", `Signal Fragments` = "fragments_used_for_signal")
   if (NROW(alignment) && "sample" %in% names(alignment)) {
@@ -3427,7 +3450,8 @@ cutrun_seacr_method_label <- function(method) {
     raw_norm_relaxed = "Raw track / SEACR norm / relaxed",
     legacy = "Legacy SEACR output"
   )
-  unname(labels[[method]] %||% method)
+  value <- unname(labels[method])
+  if (!length(value) || is.na(value) || !nzchar(value)) method else value
 }
 
 cutrun_seacr_peak_total <- function(path) {
@@ -3509,7 +3533,7 @@ genome_browser_track_catalog <- function(project) {
     list.files(signal_root, pattern = "\\.(bw|bigwig)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE)
   } else character(0)
   peak_roots <- if (is_cutrun_project(project)) {
-    file.path(project$data_dir, c("seacr", "macs2"))
+    file.path(project$data_dir, c("seacr", "macs2", "peak_overlap"))
   } else {
     file.path(project$data_dir, "macs2")
   }
@@ -3913,8 +3937,13 @@ cutrun_browser_peak_rows <- function(project, catalog, sample) {
   # `normalizePath(..., mustWork = FALSE)` may retain a doubled temporary-path
   # separator on macOS, so identify the explicit result-folder component instead.
   is_seacr <- grepl("/seacr/", rows$path, fixed = TRUE)
-  rows$tool <- ifelse(is_seacr, "SEACR", "MACS2")
+  is_overlap <- grepl("/peak_overlap/", rows$path, fixed = TRUE)
+  rows$tool <- ifelse(is_overlap, "Shared overlap", ifelse(is_seacr, "SEACR", "MACS2"))
   rows$parameters <- vapply(seq_len(NROW(rows)), function(i) {
+    if (is_overlap[[i]]) {
+      summary <- metric_file_to_named_list(sub("\\.bed$", "_summary.txt", rows$path[[i]]))
+      return(summary[["overlap_name"]] %||% basename(dirname(dirname(rows$path[[i]]))))
+    }
     if (is_seacr[[i]]) {
       parts <- strsplit(rows$path[[i]], "/", fixed = TRUE)[[1]]
       method_hits <- parts[grepl("^((spikein|cpm)_non|raw_norm|norm|non)_(stringent|relaxed)$", parts)]
@@ -4124,9 +4153,9 @@ cutrun_files_by_category <- function(project, category = "all") {
     qc = unlist(lapply(file.path(project$data_dir, c("fastqc", "fastqc_cutadapt")), function(path) if (dir.exists(path)) list.files(path, pattern = "\\.(html|zip)$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE) else character(0)), use.names = FALSE),
     alignment = result_file_choices(project, "bowtie2", "\\.(bam|bai|txt|jpg|jpeg|png|pdf)$"),
     signal = result_file_choices(project, "bowtie2", "\\.(bw|bedgraph)$"),
-    peaks = result_file_choices(project, c("seacr", "cutrun_dedup_sensitivity", "macs2", "cutrun_peak_qc", "peak_annotation"), "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv)$"),
+    peaks = result_file_choices(project, c("seacr", "cutrun_dedup_sensitivity", "macs2", "peak_overlap", "cutrun_peak_qc", "peak_annotation"), "\\.(bed|narrowPeak|broadPeak|xls|txt|tsv)$"),
     differential = result_file_choices(project, "cutrun_diffbind", "\\.(bed|txt|tsv|csv|png|pdf|rds)$"),
-    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "seacr", "cutrun_dedup_sensitivity", "macs2", "cutrun_peak_qc", "cutrun_diffbind", "peak_annotation"), "\\.(html|zip|bam|bai|bw|bedgraph|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
+    result_file_choices(project, c("fastqc", "fastqc_cutadapt", "bowtie2", "seacr", "cutrun_dedup_sensitivity", "macs2", "peak_overlap", "cutrun_peak_qc", "cutrun_diffbind", "peak_annotation"), "\\.(html|zip|bam|bai|bw|bedgraph|bed|narrowPeak|broadPeak|xls|txt|tsv|csv|png|jpg|jpeg|pdf|rds)$")
   )
   files <- unname(files)
   files <- sort(unique(files[file.exists(files)]))
@@ -4637,6 +4666,9 @@ cutrun_results_explorer_ui <- function() {
                 div(class = "cutrun-section-heading", tags$h4("SEACR peak summary by method"), tags$p("One row per target sample. Peak-count columns are added or removed automatically as SEACR method folders are created or deleted."), downloadButton("download_cutrun_seacr_peak_summary", "Download summary")),
                 table_output("cutrun_seacr_peak_summary"),
                 br(),
+                div(class = "cutrun-section-heading", tags$h4("Shared peak overlap summary"), tags$p("One row per sample and selected caller/settings pair. These counts are also added to the project-wide peak summary above."), downloadButton("download_cutrun_peak_overlap_summary", "Download overlap summary")),
+                table_output("cutrun_peak_overlap_summary"),
+                br(),
                 div(class = "cutrun-section-heading", tags$h4("SEACR FRiP summary"), downloadButton("download_cutrun_frip", "Download FRiP")),
                 table_output("cutrun_frip_summary"),
                 br(),
@@ -4664,6 +4696,23 @@ cutrun_results_explorer_ui <- function() {
                     div(class = "cutrun-section-heading", tags$h4("Selected SEACR peaks"), downloadButton("download_cutrun_seacr", "Download BED")),
                     table_output("cutrun_seacr_peak_table"),
                     tags$p(class = "muted small-note", "The browser preview displays at most the first 5,000 peaks for responsiveness. Download the BED to access every peak.")
+                  )
+                )
+              ),
+              tabPanel("Shared Peaks",
+                br(),
+                sidebarLayout(
+                  sidebarPanel(
+                    width = 3,
+                    uiOutput("cutrun_peak_overlap_ui"),
+                    tags$hr(),
+                    helpText("Inspect the standard three-column BED created from the exact genomic intersection of two selected peak caller/settings.")
+                  ),
+                  mainPanel(
+                    width = 9,
+                    div(class = "cutrun-section-heading", tags$h4("Selected shared overlap peaks"), downloadButton("download_cutrun_peak_overlap", "Download BED")),
+                    table_output("cutrun_peak_overlap_table"),
+                    tags$p(class = "muted small-note", "The preview displays at most the first 5,000 peaks. The same overlap BED is available in the CUT&RUN Genome Browser under Peak-calling tool: Shared overlap.")
                   )
                 )
               ),
@@ -6256,6 +6305,110 @@ cutrun_seacr_combo_dir <- function(project, norm = "non", stringency = "stringen
   file.path(project$data_dir, root, cutrun_seacr_combo_key(norm, stringency, track))
 }
 
+# A peak source is a caller plus its concrete settings, not merely a tool name.
+# This makes a shared-peak result reproducible and keeps overlapping runs with
+# different SEACR/MACS2 parameters in distinct folders.
+cutrun_peak_source_catalog <- function(project) {
+  rows <- list()
+  seacr_methods <- cutrun_seacr_method_dirs(project)
+  for (method in seacr_methods) {
+    rows[[length(rows) + 1L]] <- data.frame(
+      source_id = paste0("seacr_", method), tool = "SEACR", setting = method,
+      label = paste("SEACR", cutrun_seacr_method_label(method), sep = " — "),
+      stringsAsFactors = FALSE, check.names = FALSE
+    )
+  }
+  macs_root <- file.path(project$data_dir, "macs2")
+  summaries <- if (dir.exists(macs_root)) list.files(macs_root, pattern = "_macs2_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
+  macs_rows <- lapply(summaries, function(path) {
+    values <- metric_file_to_named_list(path)
+    sample <- trimws(as.character(values[["sample"]] %||% basename(dirname(path))))
+    peak_type <- tolower(trimws(as.character(values[["peak_type"]] %||% "narrow")))
+    qvalue <- trimws(as.character(values[["qval"]] %||% values[["qvalue"]] %||% "0.01"))
+    peak_file <- trimws(as.character(values[["peak_file"]] %||% ""))
+    if (!nzchar(sample) || !peak_type %in% c("narrow", "broad") || !nzchar(peak_file) || !file.exists(peak_file) || file_size_for(peak_file) <= 0) return(NULL)
+    q_slug <- gsub("[^A-Za-z0-9]+", "_", qvalue)
+    data.frame(
+      source_id = paste0("macs2_", peak_type, "_q_", q_slug), tool = "MACS2",
+      setting = paste(peak_type, "q", qvalue), sample = sample, peak_file = peak_file,
+      stringsAsFactors = FALSE, check.names = FALSE
+    )
+  })
+  macs_rows <- Filter(Negate(is.null), macs_rows)
+  if (length(macs_rows)) {
+    macs <- do.call(rbind, macs_rows)
+    for (source_id in unique(macs$source_id)) {
+      hit <- macs[macs$source_id == source_id, , drop = FALSE]
+      rows[[length(rows) + 1L]] <- data.frame(
+        source_id = source_id, tool = "MACS2", setting = hit$setting[[1]],
+        label = paste0("MACS2 — ", hit$setting[[1]], " (", NROW(hit), " completed sample", if (NROW(hit) == 1L) "" else "s", ")"),
+        stringsAsFactors = FALSE, check.names = FALSE
+      )
+    }
+  }
+  if (!length(rows)) return(data.frame(source_id = character(0), tool = character(0), setting = character(0), label = character(0), stringsAsFactors = FALSE))
+  do.call(rbind, rows)
+}
+
+cutrun_peak_source_file <- function(project, source_id, sample) {
+  sources <- cutrun_peak_source_catalog(project)
+  source <- sources[sources$source_id == source_id, , drop = FALSE]
+  if (!NROW(source)) return("")
+  if (identical(source$tool[[1]], "SEACR")) {
+    method <- source$setting[[1]]
+    stringency <- sub("^.*_(stringent|relaxed)$", "\\1", method)
+    path <- file.path(project$data_dir, "seacr", method, sample, paste0(sample, ".", stringency, ".bed"))
+    return(if (file.exists(path) && file_size_for(path) > 0) normalizePath(path, winslash = "/", mustWork = TRUE) else "")
+  }
+  macs_root <- file.path(project$data_dir, "macs2", sample)
+  summary <- file.path(macs_root, paste0(sample, "_macs2_summary.txt"))
+  values <- metric_file_to_named_list(summary)
+  peak_type <- tolower(trimws(as.character(values[["peak_type"]] %||% "narrow")))
+  qvalue <- trimws(as.character(values[["qval"]] %||% values[["qvalue"]] %||% "0.01"))
+  candidate_id <- paste0("macs2_", peak_type, "_q_", gsub("[^A-Za-z0-9]+", "_", qvalue))
+  path <- trimws(as.character(values[["peak_file"]] %||% ""))
+  if (!identical(candidate_id, source_id) || !file.exists(path) || file_size_for(path) <= 0) return("")
+  normalizePath(path, winslash = "/", mustWork = TRUE)
+}
+
+cutrun_peak_overlap_name <- function(source_a, source_b) {
+  paste(clean_name(source_a, "source_a"), clean_name(source_b, "source_b"), "overlap_peaks", sep = "__")
+}
+
+cutrun_peak_overlap_dir <- function(project, source_a, source_b) {
+  file.path(project$data_dir, "peak_overlap", cutrun_peak_overlap_name(source_a, source_b))
+}
+
+cutrun_peak_overlap_bed <- function(project, source_a, source_b, sample) {
+  name <- cutrun_peak_overlap_name(source_a, source_b)
+  file.path(cutrun_peak_overlap_dir(project, source_a, source_b), sample, paste0(sample, "_", name, ".bed"))
+}
+
+cutrun_peak_overlap_summary_path <- function(project, source_a, source_b, sample) {
+  sub("\\.bed$", "_summary.txt", cutrun_peak_overlap_bed(project, source_a, source_b, sample))
+}
+
+cutrun_peak_overlap_summary_table <- function(project) {
+  root <- file.path(project$data_dir, "peak_overlap")
+  paths <- if (dir.exists(root)) list.files(root, pattern = "_overlap_peaks_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
+  rows <- lapply(sort(paths), function(path) {
+    values <- metric_file_to_named_list(path)
+    if (!length(values)) return(NULL)
+    data.frame(
+      Sample = values[["sample"]] %||% basename(dirname(path)),
+      `Overlap set` = values[["overlap_name"]] %||% basename(dirname(dirname(path))),
+      `First source peaks` = values[["source_a_peaks"]] %||% "",
+      `Second source peaks` = values[["source_b_peaks"]] %||% "",
+      `Shared overlap peaks` = values[["overlap_peaks"]] %||% "",
+      `Minimum reciprocal overlap` = values[["minimum_reciprocal_overlap"]] %||% "0",
+      `Overlap BED` = values[["overlap_bed"]] %||% "",
+      stringsAsFactors = FALSE, check.names = FALSE
+    )
+  })
+  rows <- Filter(Negate(is.null), rows)
+  if (length(rows)) do.call(rbind, rows) else data.frame()
+}
+
 cutrun_macs2_peak_type_for <- function(project, sample, default = "auto") {
   default <- tolower(trimws(as.character(default %||% "auto")))
   if (default %in% c("narrow", "broad")) return(default)
@@ -6981,6 +7134,53 @@ submit_cutrun_seacr_jobs <- function(project, norm = "non", stringency = "string
       project, "SEACR", script,
       c(cutrun_seacr_bedgraph(project, sample, norm, track), control_bdg, norm, sample_stringency, file.path(sample_dir, sample), project$name, cutrun_bowtie2_fragments(project, sample), file.path(SCRIPTS_DIR, "SEACR", "seacr_cutrun.sh")),
       "seacr", paste(track, norm, sample_stringency), sample = sample, target = target, reference = "SEACR local script"
+    )
+  }, character(1))
+  paste(append_plan_message(messages, plan), collapse = "\n")
+}
+
+submit_cutrun_peak_overlap_jobs <- function(project, source_a, source_b, samples = NULL, minimum_reciprocal_overlap = 0) {
+  if (!is_cutrun_project(project)) return(record_preflight_failure(project, "Peak Overlap", "Peak overlap is available only for CUT&RUN projects.", "peak_overlap"))
+  sources <- cutrun_peak_source_catalog(project)
+  available <- as.character(sources$source_id)
+  source_a <- selected_choice(source_a, available, "")
+  source_b <- selected_choice(source_b, available, "")
+  if (!nzchar(source_a) || !nzchar(source_b) || identical(source_a, source_b)) {
+    return(record_preflight_failure(project, "Peak Overlap", "Select two different completed peak caller/settings to intersect.", "peak_overlap"))
+  }
+  minimum_reciprocal_overlap <- suppressWarnings(as.numeric(minimum_reciprocal_overlap))
+  if (!is.finite(minimum_reciprocal_overlap) || minimum_reciprocal_overlap < 0 || minimum_reciprocal_overlap > 1) {
+    return(record_preflight_failure(project, "Peak Overlap", "Minimum reciprocal overlap must be a number from 0 (any shared base) through 1.", "peak_overlap"))
+  }
+  design <- cutrun_target_design(project, include_controls = FALSE)
+  selected <- tryCatch(requested_sample_subset(project, design$sample, samples, "CUT&RUN peak overlap"), error = function(e) e)
+  if (inherits(selected, "error")) return(record_preflight_failure(project, "Peak Overlap", conditionMessage(selected), "peak_overlap"))
+  source_a_paths <- stats::setNames(vapply(selected, function(sample) cutrun_peak_source_file(project, source_a, sample), character(1)), selected)
+  source_b_paths <- stats::setNames(vapply(selected, function(sample) cutrun_peak_source_file(project, source_b, sample), character(1)), selected)
+  missing <- selected[!nzchar(source_a_paths[selected]) | !nzchar(source_b_paths[selected])]
+  if (length(missing)) {
+    return(record_preflight_failure(project, "Peak Overlap", paste(
+      "Both selected peak sources must be completed for every selected sample.",
+      "Missing a source for:", paste(missing, collapse = ", ")
+    ), "peak_overlap"))
+  }
+  overlap_name <- cutrun_peak_overlap_name(source_a, source_b)
+  target_list <- stats::setNames(lapply(selected, function(sample) cutrun_peak_overlap_summary_path(project, source_a, source_b, sample)), selected)
+  plan <- sample_submission_plan(project, "Peak Overlap", target_list)
+  if (!length(plan$samples)) return(plan$message)
+  qsub <- file.path(SCRIPTS_DIR, "CUTRUN", "qsub_cutrun_peak_overlap.sh")
+  runner <- file.path(SCRIPTS_DIR, "CUTRUN", "cutrun_peak_overlap.sh")
+  missing_scripts <- c(qsub, runner)[!file.exists(c(qsub, runner))]
+  if (length(missing_scripts)) return(record_preflight_failure(project, "Peak Overlap", paste("Required overlap scripts are missing:", paste(missing_scripts, collapse = ", ")), "peak_overlap"))
+  messages <- vapply(plan$samples, function(sample) {
+    output_bed <- cutrun_peak_overlap_bed(project, source_a, source_b, sample)
+    target <- cutrun_peak_overlap_summary_path(project, source_a, source_b, sample)
+    dir.create(dirname(output_bed), recursive = TRUE, showWarnings = FALSE)
+    submit_sbatch(
+      project, "Peak Overlap", qsub,
+      c(source_a_paths[[sample]], source_b_paths[[sample]], output_bed, overlap_name, sample, format(minimum_reciprocal_overlap, scientific = FALSE, trim = TRUE), runner),
+      "cutrun_peak_overlap", paste(overlap_name, "reciprocal overlap", format(minimum_reciprocal_overlap, scientific = FALSE, trim = TRUE)),
+      sample = sample, target = target, reference = paste(source_a, "intersect", source_b)
     )
   }, character(1))
   paste(append_plan_message(messages, plan), collapse = "\n")
@@ -7931,6 +8131,7 @@ run_step_meta <- function(project = NULL) {
       "Build consensus SEACR peaks, peak counts, and FRiP summaries.",
       "Build mark-specific consensus peaks and run DiffBind/DESeq2 differential binding.",
       "Optional MACS2 peak calling for comparison or broad histone marks.",
+      "Create per-sample overlap BEDs shared by two selected caller/settings.",
       "Annotate every completed MACS2 and differential peak file with nearby genes."
     )
   } else if (!is.null(project) && is_atac_project(project)) {
@@ -10222,6 +10423,12 @@ server <- function(input, output, session) {
             tags$p(class = "muted small-note", "Automatic uses broad for histone_broad and narrow for histone_narrow or tf_or_other. This setting affects only optional MACS2; SEACR retains native enriched-region widths.")
           ),
           "run_cutrun_macs2", "Submit MACS2"),
+        tool_panel("Peak Overlap", status, "Create a per-sample BED of genomic regions shared by two selected completed peak caller/settings.",
+          tagList(
+            uiOutput("cutrun_peak_overlap_controls_ui"),
+            tags$p(class = "muted small-note", "The output contains only the genomic intersection of the two selected peak files, merged into a standard three-column BED. Each run is stored separately under data/peak_overlap/{tool_setting__tool_setting__overlap_peaks}/ and is available in the Results Explorer and Genome Browser.")
+          ),
+          "run_cutrun_peak_overlap", "Submit selected peak overlaps", show_sample_progress = FALSE, show_job_actions = FALSE),
         tool_panel("Peak Annotation", status, "Annotate every completed CUT&RUN MACS2 and differential peak file with nearby genes.", tagList(
           tags$p(class = "muted small-note", "This project-level final step scans all completed samples and differential comparisons. Both all-peak and significant differential result files are annotated."),
           tags$p(class = "muted small-note", "Peak statistics are shown as explicit columns—including differential p.value and FDR when available—and a project summary records every source and annotated file.")
@@ -10557,6 +10764,39 @@ server <- function(input, output, session) {
     )
   })
   output$cutrun_macs2_samples_ui <- renderUI(step_sample_selector("cutrun_macs2_samples", "Target samples for MACS2", "MACS2 (optional)", targets_only = TRUE))
+  output$cutrun_peak_overlap_controls_ui <- renderUI({
+    p <- current_project()
+    if (!is_cutrun_project(p)) return(NULL)
+    sources <- cutrun_peak_source_catalog(p)
+    if (NROW(sources) < 2L) {
+      return(div(class = "empty-box", "Complete at least two peak caller/settings first (for example SEACR raw/norm/relaxed and MACS2)."))
+    }
+    source_choices <- stats::setNames(as.character(sources$source_id), as.character(sources$label))
+    source_a <- selected_choice(input$cutrun_peak_overlap_source_a, source_choices, unname(source_choices)[[1]])
+    source_b_choices <- source_choices[unname(source_choices) != source_a]
+    source_b <- selected_choice(input$cutrun_peak_overlap_source_b, source_b_choices, unname(source_b_choices)[[1]])
+    targets <- as.character(cutrun_target_design(p, include_controls = FALSE)$sample)
+    eligible <- targets[vapply(targets, function(sample) {
+      nzchar(cutrun_peak_source_file(p, source_a, sample)) && nzchar(cutrun_peak_source_file(p, source_b, sample))
+    }, logical(1))]
+    overlap_key <- paste(p$id %||% p$name, source_a, source_b, sep = "::")
+    previous_key <- if (exists("cutrun_peak_overlap_samples", envir = step_selector_context, inherits = FALSE)) get("cutrun_peak_overlap_samples", envir = step_selector_context) else NULL
+    assign("cutrun_peak_overlap_samples", overlap_key, envir = step_selector_context)
+    completed <- eligible[vapply(eligible, function(sample) {
+      path <- cutrun_peak_overlap_summary_path(p, source_a, source_b, sample)
+      file.exists(path) && file_size_for(path) > 0
+    }, logical(1))]
+    current <- isolate(input$cutrun_peak_overlap_samples %||% character(0))
+    selected <- if (is.null(previous_key) || !identical(previous_key, overlap_key)) setdiff(eligible, completed) else intersect(as.character(current), eligible)
+    labels <- ifelse(eligible %in% completed, paste0(eligible, " — complete"), eligible)
+    tagList(
+      selectInput("cutrun_peak_overlap_source_a", "First peak caller / setting", choices = source_choices, selected = source_a, selectize = FALSE),
+      selectInput("cutrun_peak_overlap_source_b", "Second peak caller / setting", choices = source_b_choices, selected = source_b, selectize = FALSE),
+      numericInput("cutrun_peak_overlap_reciprocal", "Minimum reciprocal overlap (0 = any shared base)", value = input$cutrun_peak_overlap_reciprocal %||% 0, min = 0, max = 1, step = 0.05),
+      if (length(eligible)) checkboxGroupInput("cutrun_peak_overlap_samples", "Target samples with both source files", choices = stats::setNames(eligible, labels), selected = selected) else div(class = "empty-box", "No target sample has both selected peak sources completed."),
+      tags$p(class = "muted small-note", "Only samples with both selected inputs are offered. Completed overlap sets are initially unchecked; a zero-overlap result is still a completed, valid result and receives a clear marker file.")
+    )
+  })
   output$atac_cutadapt_samples_ui <- renderUI(step_sample_selector("atac_cutadapt_samples", "Samples to trim", "Cutadapt"))
   output$atac_fastqc_samples_ui <- renderUI(step_sample_selector("atac_fastqc_samples", "Samples for QC", "FastQC"))
   output$atac_bowtie2_samples_ui <- renderUI(step_sample_selector("atac_bowtie2_samples", "Samples to align", "Bowtie2"))
@@ -10749,6 +10989,18 @@ server <- function(input, output, session) {
       "MACS2",
       submit_cutrun_macs2_jobs(current_project(), input$cutrun_macs2_qvalue %||% "0.01", input$cutrun_macs2_peak_type %||% "auto", samples),
       paste(input$cutrun_macs2_peak_type %||% "auto", "q", input$cutrun_macs2_qvalue %||% "0.01"),
+      samples = samples
+    )
+  })
+  observeEvent(input$run_cutrun_peak_overlap, {
+    samples <- input$cutrun_peak_overlap_samples %||% character(0)
+    source_a <- input$cutrun_peak_overlap_source_a %||% ""
+    source_b <- input$cutrun_peak_overlap_source_b %||% ""
+    reciprocal <- input$cutrun_peak_overlap_reciprocal %||% 0
+    run_submission(
+      "Peak Overlap",
+      submit_cutrun_peak_overlap_jobs(current_project(), source_a, source_b, samples, reciprocal),
+      paste(cutrun_peak_overlap_name(source_a, source_b), "reciprocal overlap", reciprocal),
       samples = samples
     )
   })
@@ -11685,6 +11937,37 @@ server <- function(input, output, session) {
         cutrun_metric_card("File size", human_file_size(path), "BED output", "purple")
     )
   })
+  output$cutrun_peak_overlap_summary <- render_csl_table({
+    progress_refresh()
+    cutrun_peak_overlap_summary_table(current_project())
+  }, page_length = 50, scroll_y = "420px")
+  output$cutrun_peak_overlap_ui <- renderUI({
+    req(identical(input$web_main_tabs %||% "", "Results Explorer"))
+    progress_refresh()
+    summary <- cutrun_peak_overlap_summary_table(current_project())
+    if (!NROW(summary) || !all(c("Sample", "Overlap set", "Overlap BED") %in% names(summary))) {
+      return(div(class = "empty-box", "No completed shared peak-overlap BED files were found yet."))
+    }
+    sets <- sort(unique(trimws(as.character(summary[["Overlap set"]]))))
+    sets <- sets[nzchar(sets)]
+    selected_set <- selected_choice(input$cutrun_peak_overlap_set, sets, sets[[1]])
+    rows <- summary[trimws(as.character(summary[["Overlap set"]])) == selected_set, , drop = FALSE]
+    paths <- trimws(as.character(rows[["Overlap BED"]]))
+    keep <- nzchar(paths) & file.exists(paths) & vapply(paths, file_size_for, numeric(1)) >= 0
+    rows <- rows[keep, , drop = FALSE]
+    paths <- paths[keep]
+    if (!length(paths)) return(div(class = "empty-box", "The selected overlap summary does not point to an available BED file."))
+    labels <- paste(as.character(rows[["Sample"]]), paste0(rows[["Shared overlap peaks"]], " shared peaks"), sep = " — ")
+    tagList(
+      selectInput("cutrun_peak_overlap_set", "Caller/settings overlap", choices = sets, selected = selected_set, selectize = FALSE),
+      selectInput("cutrun_peak_overlap_file", "Target sample", choices = stats::setNames(paths, labels), selected = selected_choice(input$cutrun_peak_overlap_file, paths, paths[[1]]), selectize = FALSE)
+    )
+  })
+  output$cutrun_peak_overlap_table <- render_csl_table({
+    path <- validated_project_result_path(current_project(), input$cutrun_peak_overlap_file)
+    validate(need(nzchar(path), "Choose a shared peak-overlap BED file from the current project."))
+    safe_read_result_table(path, 5000)
+  }, page_length = 50)
   output$cutrun_macs2_peak_ui <- renderUI({
     req(identical(input$web_main_tabs %||% "", "Results Explorer"))
     progress_refresh()
@@ -11889,6 +12172,10 @@ server <- function(input, output, session) {
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_seacr_peak_summary.tsv"),
     content = function(file) utils::write.table(cutrun_seacr_peak_summary_table(current_project()), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
   )
+  output$download_cutrun_peak_overlap_summary <- downloadHandler(
+    filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_shared_peak_overlap_summary.tsv"),
+    content = function(file) utils::write.table(cutrun_peak_overlap_summary_table(current_project()), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
+  )
   output$download_cutrun_seacr <- downloadHandler(
     filename = function() {
       path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
@@ -11896,6 +12183,17 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       path <- validated_project_result_path(current_project(), input$cutrun_seacr_peak_file)
+      req(nzchar(path))
+      file.copy(path, file, overwrite = TRUE)
+    }
+  )
+  output$download_cutrun_peak_overlap <- downloadHandler(
+    filename = function() {
+      path <- validated_project_result_path(current_project(), input$cutrun_peak_overlap_file)
+      if (nzchar(path)) basename(path) else "shared_overlap_peaks.bed"
+    },
+    content = function(file) {
+      path <- validated_project_result_path(current_project(), input$cutrun_peak_overlap_file)
       req(nzchar(path))
       file.copy(path, file, overwrite = TRUE)
     }

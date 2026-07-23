@@ -617,12 +617,43 @@ for (spec in list(c("S1", "norm"), c("S2", "non"))) {
 }
 assert(identical(app_env$completed_cutrun_seacr_samples(seacr_selector_project, c("S1", "S2"), "norm", "stringent"), "S1"), "SEACR selector completion is specific to norm/stringency and accepts a completed zero-peak result")
 assert(identical(app_env$completed_cutrun_seacr_samples(seacr_selector_project, c("S1", "S2"), "non", "stringent"), "S2"), "SEACR non completion does not hide samples from the norm selector")
+shared_seacr_peak <- app_env$cutrun_seacr_peak_path(seacr_selector_project, "S1", "norm", "relaxed", "raw")
+shared_seacr_summary <- app_env$cutrun_seacr_summary_path(seacr_selector_project, "S1", "norm", "relaxed", "raw")
+dir.create(dirname(shared_seacr_peak), recursive = TRUE, showWarnings = FALSE)
+writeLines(c("chr1\t100\t220\t25", "chr1\t400\t520\t15"), shared_seacr_peak)
+writeLines(c("normalization\tnorm", "stringency\trelaxed", "peak_count\t2"), shared_seacr_summary)
+shared_macs_dir <- file.path(seacr_selector_project$data_dir, "macs2", "S1")
+dir.create(shared_macs_dir, recursive = TRUE, showWarnings = FALSE)
+shared_macs_peak <- file.path(shared_macs_dir, "S1_peaks.narrowPeak")
+writeLines(c("chr1\t150\t250\tpeak1\t100", "chr1\t600\t700\tpeak2\t100"), shared_macs_peak)
+writeLines(c("sample\tS1", "qval\t0.01", "peak_type\tnarrow", paste0("peak_file\t", shared_macs_peak), "peak_count\t2"), file.path(shared_macs_dir, "S1_macs2_summary.txt"))
+shared_sources <- app_env$cutrun_peak_source_catalog(seacr_selector_project)
+shared_seacr_id <- "seacr_raw_norm_relaxed"
+shared_macs_id <- "macs2_narrow_q_0_01"
+assert(all(c(shared_seacr_id, shared_macs_id) %in% shared_sources$source_id), "CUT&RUN peak-overlap sources distinguish each caller and concrete setting")
+assert(
+  identical(app_env$cutrun_peak_source_file(seacr_selector_project, shared_seacr_id, "S1"), normalizePath(shared_seacr_peak)) &&
+    identical(app_env$cutrun_peak_source_file(seacr_selector_project, shared_macs_id, "S1"), normalizePath(shared_macs_peak)),
+  "peak-overlap source selection resolves the correct per-sample SEACR and MACS2 inputs"
+)
+shared_overlap_bed <- app_env$cutrun_peak_overlap_bed(seacr_selector_project, shared_seacr_id, shared_macs_id, "S1")
+shared_overlap_summary <- app_env$cutrun_peak_overlap_summary_path(seacr_selector_project, shared_seacr_id, shared_macs_id, "S1")
+dir.create(dirname(shared_overlap_bed), recursive = TRUE, showWarnings = FALSE)
+writeLines("chr1\t150\t220", shared_overlap_bed)
+writeLines(c("sample\tS1", paste0("overlap_name\t", app_env$cutrun_peak_overlap_name(shared_seacr_id, shared_macs_id)), "source_a_peaks\t2", "source_b_peaks\t2", "overlap_peaks\t1", "minimum_reciprocal_overlap\t0", paste0("overlap_bed\t", shared_overlap_bed)), shared_overlap_summary)
+shared_overlap_summary_table <- app_env$cutrun_peak_overlap_summary_table(seacr_selector_project)
+assert(NROW(shared_overlap_summary_table) == 1L && shared_overlap_summary_table[["Shared overlap peaks"]][[1]] == "1", "shared peak-overlap output produces a compact per-sample summary table")
+shared_project_summary <- app_env$cutrun_seacr_peak_summary_table(seacr_selector_project)
+assert(any(grepl("Shared Peaks:", names(shared_project_summary), fixed = TRUE)), "project peak summary automatically adds each shared-overlap peak count column")
 app_source_text <- paste(readLines(file.path(repo_root, "app.R"), warn = FALSE), collapse = "\n")
 assert(grepl("Select all samples", app_source_text, fixed = TRUE) && grepl("Clear selection", app_source_text, fixed = TRUE), "sample-level step selectors expose select-all and clear controls")
 assert(grepl("cslRestoreToolPanels", app_source_text, fixed = TRUE) && grepl("server = TRUE", app_source_text, fixed = TRUE), "pipeline panels preserve open state and tables use server-side rendering")
 assert(grepl("Track normalization to generate", app_source_text, fixed = TRUE) && grepl("Generate selected signal tracks", app_source_text, fixed = TRUE), "CUT&RUN app exposes normalization regeneration from existing aligned BAMs")
+assert(grepl("run_cutrun_peak_overlap", app_source_text, fixed = TRUE) && grepl("Shared Peaks", app_source_text, fixed = TRUE), "CUT&RUN app exposes selectable shared peak-overlap runs and results")
 
 assert(system2("bash", c("-n", shQuote(file.path(repo_root, "run_codespringweb.sh")))) == 0L, "CodeSpringApp launcher shell syntax is valid")
+assert(system2("bash", c("-n", shQuote(file.path(lab_root, "scripts_DoNotTouch", "CUTRUN", "cutrun_peak_overlap.sh")))) == 0L, "CUT&RUN overlap runner shell syntax is valid")
+assert(system2("bash", c("-n", shQuote(file.path(lab_root, "scripts_DoNotTouch", "CUTRUN", "qsub_cutrun_peak_overlap.sh")))) == 0L, "CUT&RUN overlap submission wrapper shell syntax is valid")
 
 bad_q <- app_env$submit_atac_macs2_jobs(atac_project, "not-a-number", "A1")
 assert(grepl("q-value must be", bad_q), "invalid ATAC MACS2 q-value rejected before submission")
