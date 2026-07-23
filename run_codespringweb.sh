@@ -3,13 +3,12 @@ set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK_CONFIG=0
+REQUESTED_START_PORT=""
 if [[ "${1:-}" == "--check-config" ]]; then
   CHECK_CONFIG=1
-  START_PORT=8601
-else
-  START_PORT="${1:-8601}"
+elif [[ -n "${1:-}" ]]; then
+  REQUESTED_START_PORT="$1"
 fi
-MAX_PORT="${CSL_WEB_MAX_PORT:-8699}"
 # Only SSH tunnels and other processes on the server itself may reach Shiny.
 HOST="127.0.0.1"
 
@@ -33,6 +32,27 @@ if [[ -z "$USER_HOME" || ! -d "$USER_HOME" ]]; then
   exit 1
 fi
 USER_HOME="$(cd "$USER_HOME" && pwd -P)"
+
+# Give every Unix account its own predictable port block by default.  This
+# avoids two people who start the launcher at the same time racing for 8601.
+# A numeric argument still explicitly selects a different starting port.
+USER_ID="$(id -u 2>/dev/null || true)"
+if [[ -n "$REQUESTED_START_PORT" ]]; then
+  START_PORT="$REQUESTED_START_PORT"
+elif [[ "$USER_ID" =~ ^[0-9]+$ ]]; then
+  START_PORT="$((20000 + (USER_ID % 20000)))"
+else
+  START_PORT=8601
+fi
+if [[ ! "$START_PORT" =~ ^[0-9]+$ ]] || (( START_PORT < 1024 || START_PORT > 65435 )); then
+  printf '\033[31mStarting port must be a number from 1024 to 65435.\033[0m\n'
+  exit 1
+fi
+MAX_PORT="${CSL_WEB_MAX_PORT:-$((START_PORT + 99))}"
+if [[ ! "$MAX_PORT" =~ ^[0-9]+$ ]] || (( MAX_PORT < START_PORT || MAX_PORT > 65535 )); then
+  printf '\033[31mCSL_WEB_MAX_PORT must be a number from %s to 65535.\033[0m\n' "$START_PORT"
+  exit 1
+fi
 
 path_within_user_home() {
   local path="$1"
@@ -89,6 +109,7 @@ fi
 if [[ "$CHECK_CONFIG" == "1" ]]; then
   printf '\033[32mCodeSpringApp configuration is isolated correctly.\033[0m\n'
   printf 'Unix user: %s\n' "$USER_NAME"
+  printf 'Default private port block: %s-%s\n' "$START_PORT" "$MAX_PORT"
   printf 'User home: %s\n' "$USER_HOME"
   printf 'CodeSpringApp: %s\n' "$APP_DIR"
   printf 'CodeSpringLab: %s\n' "$CSL_ROOT"

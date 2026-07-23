@@ -44,7 +44,7 @@ The server folder browser starts from the current user's home directory and hide
 
 Use the launcher script. It checks required packages, finds an open server port, starts Shiny, and prints the exact SSH tunnel command to run from your laptop.
 
-The default starting port is `8601`. If that port is already taken, the launcher automatically tries `8602`, `8603`, and so on until it finds an open port.
+By default, each Unix account receives its own predictable private block of 100 ports, derived from its Unix user ID. This means two people launching CodeSpringApp at the same time do not contend for port `8601`. The launcher selects the first free port in that user's block and prints the exact tunnel command and URL. To deliberately start from a particular port, pass it as an argument (for example, `./run_codespringweb.sh 8601`).
 
 On the server:
 
