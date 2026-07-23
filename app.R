@@ -4685,7 +4685,7 @@ cutrun_results_explorer_ui <- function() {
                 br(),
                 uiOutput("cutrun_peak_qc_cards"),
                 div(class = "cutrun-chart-card", plotOutput("cutrun_frip_plot", height = "340px")),
-                div(class = "cutrun-section-heading", tags$h4("SEACR peak summary by method"), tags$p("One row per target sample. Peak-count columns are added or removed automatically as SEACR method folders are created or deleted."), downloadButton("download_cutrun_seacr_peak_summary", "Download summary")),
+                div(class = "cutrun-section-heading", tags$h4("SEACR peak summary by method"), tags$p("One row per target sample. Peak-count columns are added or removed automatically as SEACR method folders are created or deleted. Shared-overlap columns are added automatically after overlap jobs complete."), downloadButton("download_cutrun_seacr_peak_summary", "Download TSV"), downloadButton("download_cutrun_seacr_peak_summary_xlsx", "Download Excel summary")),
                 table_output("cutrun_seacr_peak_summary"),
                 br(),
                 div(class = "cutrun-section-heading", tags$h4("Shared peak overlap summary"), tags$p("One row per sample and selected caller/settings pair. These counts are also added to the project-wide peak summary above."), downloadButton("download_cutrun_peak_overlap_summary", "Download overlap summary")),
@@ -6457,6 +6457,72 @@ cutrun_peak_overlap_summary_table <- function(project) {
   })
   rows <- Filter(Negate(is.null), rows)
   if (length(rows)) do.call(rbind, rows) else data.frame()
+}
+
+write_cutrun_peak_summary_xlsx <- function(project, file) {
+  if (!requireNamespace("openxlsx", quietly = TRUE)) {
+    stop("Excel export requires the R package 'openxlsx'. Use the TSV download if it is not installed on this server.", call. = FALSE)
+  }
+  summary <- cutrun_seacr_peak_summary_table(project)
+  overlap <- cutrun_peak_overlap_summary_table(project)
+  wb <- openxlsx::createWorkbook()
+  title_style <- openxlsx::createStyle(
+    fontColour = "#FFFFFF", fgFill = "#1F4E78", textDecoration = "bold",
+    fontSize = 14, halign = "left"
+  )
+  note_style <- openxlsx::createStyle(
+    fontColour = "#595959", fgFill = "#F2F2F2", textDecoration = "italic",
+    wrapText = TRUE, valign = "center"
+  )
+  header_style <- openxlsx::createStyle(
+    fontColour = "#1F1F1F", fgFill = "#D9EAF7", textDecoration = "bold",
+    wrapText = TRUE, valign = "center", border = "Bottom", borderColour = "#9EADBA"
+  )
+  count_columns <- grep("(Peaks|Reads|Fragments)", names(summary), ignore.case = TRUE)
+
+  openxlsx::addWorksheet(wb, "All Target Samples", gridLines = FALSE)
+  openxlsx::writeData(wb, "All Target Samples", "All CUT&RUN Target Samples", startRow = 1, startCol = 1, colNames = FALSE)
+  openxlsx::writeData(
+    wb, "All Target Samples",
+    "Peak-count columns are generated from completed SEACR, MACS2, and shared peak-overlap outputs in this project.",
+    startRow = 2, startCol = 1, colNames = FALSE
+  )
+  if (NROW(summary)) {
+    openxlsx::writeData(wb, "All Target Samples", summary, startRow = 3, startCol = 1, withFilter = TRUE)
+    openxlsx::addStyle(wb, "All Target Samples", header_style, rows = 3, cols = seq_len(NCOL(summary)), gridExpand = TRUE)
+    if (length(count_columns)) {
+      openxlsx::addStyle(
+        wb, "All Target Samples",
+        openxlsx::createStyle(numFmt = "#,##0"),
+        rows = seq.int(4, 3 + NROW(summary)), cols = count_columns, gridExpand = TRUE, stack = TRUE
+      )
+    }
+    openxlsx::setColWidths(wb, "All Target Samples", cols = seq_len(NCOL(summary)), widths = pmin(28, pmax(13, nchar(names(summary)) / 1.5)))
+  }
+  openxlsx::mergeCells(wb, "All Target Samples", cols = seq_len(max(1L, NCOL(summary))), rows = 1)
+  openxlsx::mergeCells(wb, "All Target Samples", cols = seq_len(max(1L, NCOL(summary))), rows = 2)
+  openxlsx::addStyle(wb, "All Target Samples", title_style, rows = 1, cols = 1)
+  openxlsx::addStyle(wb, "All Target Samples", note_style, rows = 2, cols = 1)
+  openxlsx::setRowHeights(wb, "All Target Samples", rows = 1, heights = 24)
+  openxlsx::setRowHeights(wb, "All Target Samples", rows = 2, heights = 30)
+  openxlsx::setRowHeights(wb, "All Target Samples", rows = 3, heights = 38)
+  openxlsx::freezePane(wb, "All Target Samples", firstActiveRow = 4)
+
+  if (NROW(overlap)) {
+    openxlsx::addWorksheet(wb, "Shared Peak Overlap Details", gridLines = FALSE)
+    openxlsx::writeData(wb, "Shared Peak Overlap Details", "Shared CUT&RUN Peak Overlap Details", startRow = 1, startCol = 1, colNames = FALSE)
+    openxlsx::writeData(wb, "Shared Peak Overlap Details", "One row per sample and selected caller/settings pair.", startRow = 2, startCol = 1, colNames = FALSE)
+    openxlsx::writeData(wb, "Shared Peak Overlap Details", overlap, startRow = 3, startCol = 1, withFilter = TRUE)
+    openxlsx::mergeCells(wb, "Shared Peak Overlap Details", cols = seq_len(NCOL(overlap)), rows = 1)
+    openxlsx::mergeCells(wb, "Shared Peak Overlap Details", cols = seq_len(NCOL(overlap)), rows = 2)
+    openxlsx::addStyle(wb, "Shared Peak Overlap Details", title_style, rows = 1, cols = 1)
+    openxlsx::addStyle(wb, "Shared Peak Overlap Details", note_style, rows = 2, cols = 1)
+    openxlsx::addStyle(wb, "Shared Peak Overlap Details", header_style, rows = 3, cols = seq_len(NCOL(overlap)), gridExpand = TRUE)
+    openxlsx::setColWidths(wb, "Shared Peak Overlap Details", cols = seq_len(NCOL(overlap)), widths = pmin(45, pmax(14, nchar(names(overlap)) / 1.2)))
+    openxlsx::setRowHeights(wb, "Shared Peak Overlap Details", rows = c(1, 2, 3), heights = c(24, 24, 38))
+    openxlsx::freezePane(wb, "Shared Peak Overlap Details", firstActiveRow = 4)
+  }
+  openxlsx::saveWorkbook(wb, file, overwrite = TRUE)
 }
 
 cutrun_macs2_peak_type_for <- function(project, sample, default = "auto") {
@@ -12247,6 +12313,10 @@ server <- function(input, output, session) {
   output$download_cutrun_seacr_peak_summary <- downloadHandler(
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_seacr_peak_summary.tsv"),
     content = function(file) utils::write.table(cutrun_seacr_peak_summary_table(current_project()), file, sep = "\t", row.names = FALSE, quote = FALSE, na = "")
+  )
+  output$download_cutrun_seacr_peak_summary_xlsx <- downloadHandler(
+    filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_peak_summary.xlsx"),
+    content = function(file) write_cutrun_peak_summary_xlsx(current_project(), file)
   )
   output$download_cutrun_peak_overlap_summary <- downloadHandler(
     filename = function() paste0(clean_name(current_project()$name, "cutrun"), "_shared_peak_overlap_summary.tsv"),

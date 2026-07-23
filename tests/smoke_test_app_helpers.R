@@ -256,6 +256,12 @@ assert(
     grepl('selected = "cpm"', server_source, fixed = TRUE),
   "CUT&RUN browser resets CPM as the visualization default when peak caller/settings change"
 )
+assert(
+  exists("write_cutrun_peak_summary_xlsx", envir = app_env, inherits = FALSE) &&
+    grepl("download_cutrun_seacr_peak_summary_xlsx", server_source, fixed = TRUE) &&
+    grepl("Shared Peak Overlap Details", paste(deparse(app_env$write_cutrun_peak_summary_xlsx), collapse = "\n"), fixed = TRUE),
+  "CUT&RUN peak QC includes an Excel summary with overlap details"
+)
 
 atac_project <- chip_project
 atac_project$analysis_key <- "atac"
