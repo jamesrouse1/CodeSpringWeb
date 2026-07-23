@@ -10125,6 +10125,18 @@ server <- function(input, output, session) {
     !is.null(selected) && length(selected) && nzchar(selected) && !identical(selected, "__new__")
   })
 
+  observe({
+    viewer_only <- isTRUE(current_project()$external_results)
+    non_viewer_tabs <- c("Setup", "Design Matrix", "Run Pipeline", "Progress", "Logs", "Methods")
+    if (viewer_only) {
+      lapply(non_viewer_tabs, function(tab) hideTab("web_main_tabs", tab, session = session))
+      showTab("web_main_tabs", "Results Explorer", session = session)
+      updateTabsetPanel(session, "web_main_tabs", selected = "Results Explorer")
+    } else {
+      lapply(non_viewer_tabs, function(tab) showTab("web_main_tabs", tab, session = session))
+    }
+  })
+
   observeEvent(input$project_id, {
     selected <- input$project_id %||% "__new__"
     if (!identical(selected, "__new__")) {
