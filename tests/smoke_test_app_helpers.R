@@ -636,6 +636,13 @@ assert(
     identical(app_env$cutrun_peak_source_file(seacr_selector_project, shared_macs_id, "S1"), normalizePath(shared_macs_peak)),
   "peak-overlap source selection resolves the correct per-sample SEACR and MACS2 inputs"
 )
+assert(
+  identical(
+    unname(app_env$cutrun_peak_source_files(seacr_selector_project, shared_macs_id, c("S1", "S2"), sources = shared_sources)),
+    c(normalizePath(shared_macs_peak), "")
+  ),
+  "peak-overlap controls resolve selected source paths in one cached pass rather than rescanning all summaries per sample"
+)
 shared_overlap_bed <- app_env$cutrun_peak_overlap_bed(seacr_selector_project, shared_seacr_id, shared_macs_id, "S1")
 shared_overlap_summary <- app_env$cutrun_peak_overlap_summary_path(seacr_selector_project, shared_seacr_id, shared_macs_id, "S1")
 dir.create(dirname(shared_overlap_bed), recursive = TRUE, showWarnings = FALSE)

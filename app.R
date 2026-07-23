@@ -356,6 +356,7 @@ JOB_HISTORY_CACHE_SECONDS <- 10
 JOB_HISTORY_CACHE <- new.env(parent = emptyenv())
 METRIC_LINES_CACHE <- new.env(parent = emptyenv())
 GENOME_BROWSER_NAV_CACHE <- new.env(parent = emptyenv())
+CUTRUN_PEAK_SOURCE_CACHE <- new.env(parent = emptyenv())
 CUTRUN_DEFAULT_SPIKEIN_INDEX <- "/grid/bsr/data/data/utama/genome/ecoli_k12/bowtie2_index/ecoli_k12_mg1655"
 CUTRUN_DEFAULT_SPIKEIN_NAME <- "ecoli"
 CUTRUN_SPIKEIN_GENOME_CHOICES <- c("E. coli K-12 MG1655" = CUTRUN_DEFAULT_SPIKEIN_INDEX)
@@ -6309,8 +6310,23 @@ cutrun_seacr_combo_dir <- function(project, norm = "non", stringency = "stringen
 # This makes a shared-peak result reproducible and keeps overlapping runs with
 # different SEACR/MACS2 parameters in distinct folders.
 cutrun_peak_source_catalog <- function(project) {
-  rows <- list()
   seacr_methods <- cutrun_seacr_method_dirs(project)
+  macs_root <- file.path(project$data_dir, "macs2")
+  summaries <- if (dir.exists(macs_root)) list.files(macs_root, pattern = "_macs2_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
+  signature_parts <- c(
+    paste("seacr", sort(seacr_methods), collapse = "|"),
+    vapply(sort(summaries), function(path) {
+      info <- file.info(path)
+      paste(path, info$size[[1]], as.numeric(info$mtime[[1]]), sep = "|")
+    }, character(1))
+  )
+  cache_key <- normalizePath(project$data_dir, winslash = "/", mustWork = FALSE)
+  signature <- paste(signature_parts, collapse = "\r")
+  if (exists(cache_key, envir = CUTRUN_PEAK_SOURCE_CACHE, inherits = FALSE)) {
+    cached <- get(cache_key, envir = CUTRUN_PEAK_SOURCE_CACHE, inherits = FALSE)
+    if (identical(cached$signature, signature)) return(cached$value)
+  }
+  rows <- list()
   for (method in seacr_methods) {
     rows[[length(rows) + 1L]] <- data.frame(
       source_id = paste0("seacr_", method), tool = "SEACR", setting = method,
@@ -6318,8 +6334,6 @@ cutrun_peak_source_catalog <- function(project) {
       stringsAsFactors = FALSE, check.names = FALSE
     )
   }
-  macs_root <- file.path(project$data_dir, "macs2")
-  summaries <- if (dir.exists(macs_root)) list.files(macs_root, pattern = "_macs2_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
   macs_rows <- lapply(summaries, function(path) {
     values <- metric_file_to_named_list(path)
     sample <- trimws(as.character(values[["sample"]] %||% basename(dirname(path))))
@@ -6346,12 +6360,17 @@ cutrun_peak_source_catalog <- function(project) {
       )
     }
   }
-  if (!length(rows)) return(data.frame(source_id = character(0), tool = character(0), setting = character(0), label = character(0), stringsAsFactors = FALSE))
-  do.call(rbind, rows)
+  value <- if (!length(rows)) {
+    data.frame(source_id = character(0), tool = character(0), setting = character(0), label = character(0), stringsAsFactors = FALSE)
+  } else {
+    do.call(rbind, rows)
+  }
+  assign(cache_key, list(signature = signature, value = value), envir = CUTRUN_PEAK_SOURCE_CACHE)
+  value
 }
 
-cutrun_peak_source_file <- function(project, source_id, sample) {
-  sources <- cutrun_peak_source_catalog(project)
+cutrun_peak_source_file <- function(project, source_id, sample, sources = NULL) {
+  if (is.null(sources)) sources <- cutrun_peak_source_catalog(project)
   source <- sources[sources$source_id == source_id, , drop = FALSE]
   if (!NROW(source)) return("")
   if (identical(source$tool[[1]], "SEACR")) {
@@ -6369,6 +6388,12 @@ cutrun_peak_source_file <- function(project, source_id, sample) {
   path <- trimws(as.character(values[["peak_file"]] %||% ""))
   if (!identical(candidate_id, source_id) || !file.exists(path) || file_size_for(path) <= 0) return("")
   normalizePath(path, winslash = "/", mustWork = TRUE)
+}
+
+cutrun_peak_source_files <- function(project, source_id, samples, sources = NULL) {
+  if (is.null(sources)) sources <- cutrun_peak_source_catalog(project)
+  samples <- unique(as.character(samples %||% character(0)))
+  stats::setNames(vapply(samples, function(sample) cutrun_peak_source_file(project, source_id, sample, sources = sources), character(1)), samples)
 }
 
 cutrun_peak_overlap_name <- function(source_a, source_b) {
@@ -7155,8 +7180,8 @@ submit_cutrun_peak_overlap_jobs <- function(project, source_a, source_b, samples
   design <- cutrun_target_design(project, include_controls = FALSE)
   selected <- tryCatch(requested_sample_subset(project, design$sample, samples, "CUT&RUN peak overlap"), error = function(e) e)
   if (inherits(selected, "error")) return(record_preflight_failure(project, "Peak Overlap", conditionMessage(selected), "peak_overlap"))
-  source_a_paths <- stats::setNames(vapply(selected, function(sample) cutrun_peak_source_file(project, source_a, sample), character(1)), selected)
-  source_b_paths <- stats::setNames(vapply(selected, function(sample) cutrun_peak_source_file(project, source_b, sample), character(1)), selected)
+  source_a_paths <- cutrun_peak_source_files(project, source_a, selected, sources = sources)
+  source_b_paths <- cutrun_peak_source_files(project, source_b, selected, sources = sources)
   missing <- selected[!nzchar(source_a_paths[selected]) | !nzchar(source_b_paths[selected])]
   if (length(missing)) {
     return(record_preflight_failure(project, "Peak Overlap", paste(
@@ -10776,9 +10801,9 @@ server <- function(input, output, session) {
     source_b_choices <- source_choices[unname(source_choices) != source_a]
     source_b <- selected_choice(input$cutrun_peak_overlap_source_b, source_b_choices, unname(source_b_choices)[[1]])
     targets <- as.character(cutrun_target_design(p, include_controls = FALSE)$sample)
-    eligible <- targets[vapply(targets, function(sample) {
-      nzchar(cutrun_peak_source_file(p, source_a, sample)) && nzchar(cutrun_peak_source_file(p, source_b, sample))
-    }, logical(1))]
+    source_a_paths <- cutrun_peak_source_files(p, source_a, targets, sources = sources)
+    source_b_paths <- cutrun_peak_source_files(p, source_b, targets, sources = sources)
+    eligible <- targets[nzchar(source_a_paths[targets]) & nzchar(source_b_paths[targets])]
     overlap_key <- paste(p$id %||% p$name, source_a, source_b, sep = "::")
     previous_key <- if (exists("cutrun_peak_overlap_samples", envir = step_selector_context, inherits = FALSE)) get("cutrun_peak_overlap_samples", envir = step_selector_context) else NULL
     assign("cutrun_peak_overlap_samples", overlap_key, envir = step_selector_context)
