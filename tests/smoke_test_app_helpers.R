@@ -236,9 +236,9 @@ assert(
   "individual browser offers matched target/IgG normalization modes rather than unrelated tracks"
 )
 assert(
-  identical(app_env$cutrun_browser_signal_modes_for_peak_call(c("spikein", "cpm", "raw"), "SEACR", "Spike-in-scaled track / SEACR non / stringent"), "spikein") &&
-    identical(app_env$cutrun_browser_signal_modes_for_peak_call(c("spikein", "cpm", "raw"), "MACS2", "narrow peaks; q ≤ 0.01"), c("cpm", "raw")),
-  "individual browser derives available signal modes from the selected peak-calling method"
+  identical(app_env$cutrun_browser_signal_modes_for_peak_call(c("spikein", "cpm", "raw"), "SEACR", "Raw track / SEACR norm / relaxed"), c("spikein", "cpm", "raw")) &&
+    identical(app_env$cutrun_browser_signal_modes_for_peak_call(c("spikein", "cpm", "raw"), "MACS2", "narrow peaks; q ≤ 0.01"), c("spikein", "cpm", "raw")),
+  "individual browser keeps CPM available for display regardless of the selected peak caller input"
 )
 assert(
   grepl("cutrun_peak_mode", server_source, fixed = TRUE) &&
@@ -249,6 +249,12 @@ assert(
   grepl("observeEvent(input$genome_browser_cutrun_sample", server_source, fixed = TRUE) &&
     grepl("send_genome_browser()", server_source, fixed = TRUE),
   "changing a CUT&RUN browser target immediately reloads its target and matched-IgG tracks"
+)
+assert(
+  grepl("Signal normalization for display", server_source, fixed = TRUE) &&
+    grepl("updateSelectInput(session, \"genome_browser_cutrun_signal_normalization\",", server_source, fixed = TRUE) &&
+    grepl('selected = "cpm"', server_source, fixed = TRUE),
+  "CUT&RUN browser resets CPM as the visualization default when peak caller/settings change"
 )
 
 atac_project <- chip_project
@@ -646,10 +652,21 @@ assert(
 shared_overlap_bed <- app_env$cutrun_peak_overlap_bed(seacr_selector_project, shared_seacr_id, shared_macs_id, "S1")
 shared_overlap_summary <- app_env$cutrun_peak_overlap_summary_path(seacr_selector_project, shared_seacr_id, shared_macs_id, "S1")
 dir.create(dirname(shared_overlap_bed), recursive = TRUE, showWarnings = FALSE)
-writeLines("chr1\t150\t220", shared_overlap_bed)
-writeLines(c("sample\tS1", paste0("overlap_name\t", app_env$cutrun_peak_overlap_name(shared_seacr_id, shared_macs_id)), "source_a_peaks\t2", "source_b_peaks\t2", "overlap_peaks\t1", "minimum_reciprocal_overlap\t0", paste0("overlap_bed\t", shared_overlap_bed)), shared_overlap_summary)
+writeLines(c("chr1\t150\t220", "chr1\t400\t450"), shared_overlap_bed)
+shared_overlap_ranking <- sub("\\.bed$", "_ranking.tsv", shared_overlap_bed)
+writeLines(c(
+  "chrom\tstart\tend\tcombined_evidence_rank\tsource_a_rank\tsource_b_rank\tsource_a_evidence_score\tsource_b_evidence_score",
+  "chr1\t400\t450\t5\t3\t2\t15\t12",
+  "chr1\t150\t220\t2\t1\t1\t25\t20"
+), shared_overlap_ranking)
+writeLines(c("sample\tS1", paste0("overlap_name\t", app_env$cutrun_peak_overlap_name(shared_seacr_id, shared_macs_id)), "source_a_peaks\t2", "source_b_peaks\t2", "overlap_peaks\t2", "minimum_reciprocal_overlap\t0", paste0("overlap_bed\t", shared_overlap_bed), paste0("ranking_tsv\t", shared_overlap_ranking)), shared_overlap_summary)
 shared_overlap_summary_table <- app_env$cutrun_peak_overlap_summary_table(seacr_selector_project)
-assert(NROW(shared_overlap_summary_table) == 1L && shared_overlap_summary_table[["Shared overlap peaks"]][[1]] == "1", "shared peak-overlap output produces a compact per-sample summary table")
+assert(NROW(shared_overlap_summary_table) == 1L && shared_overlap_summary_table[["Shared overlap peaks"]][[1]] == "2", "shared peak-overlap output produces a compact per-sample summary table")
+shared_overlap_navigation <- app_env$cutrun_individual_peak_navigation(shared_overlap_bed, max_peaks = 2L)
+assert(
+  identical(unname(shared_overlap_navigation$peaks[[1]]), "chr1:151-220") && grepl("combined rank 2", names(shared_overlap_navigation$peaks)[[1]], fixed = TRUE),
+  "shared peak-overlap browser navigation uses the precomputed lowest combined caller rank first"
+)
 shared_project_summary <- app_env$cutrun_seacr_peak_summary_table(seacr_selector_project)
 assert(any(grepl("Shared Peaks:", names(shared_project_summary), fixed = TRUE)), "project peak summary automatically adds each shared-overlap peak count column")
 app_source_text <- paste(readLines(file.path(repo_root, "app.R"), warn = FALSE), collapse = "\n")

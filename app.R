@@ -3463,6 +3463,15 @@ cutrun_seacr_peak_total <- function(path) {
   length(tryCatch(readLines(path, warn = FALSE), error = function(e) character(0)))
 }
 
+cutrun_browser_peak_total <- function(path) {
+  if (grepl("/peak_overlap/", normalizePath(path, winslash = "/", mustWork = FALSE), fixed = TRUE)) {
+    values <- metric_file_to_named_list(sub("\\.bed$", "_summary.txt", path))
+    total <- suppressWarnings(as.numeric(values[["overlap_peaks"]] %||% NA_character_))
+    if (is.finite(total)) return(total)
+  }
+  cutrun_seacr_peak_total(path)
+}
+
 cutrun_peak_qc_summary_table <- function(project) {
   root <- file.path(project$data_dir, "cutrun_peak_qc")
   paths <- if (dir.exists(root)) list.files(root, pattern = "^cutrun_peak_qc_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
@@ -3886,9 +3895,14 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
     if (identical(cached$signature, signature)) return(cached$value)
   }
 
-  # Keep initial browser rendering responsive: scan a bounded prefix, rank it
-  # by caller signal, then expose only the strongest intervals in the menu.
-  peaks <- safe_read_result_table(path, scan_limit)
+  ranking_path <- sub("\\.bed$", "_ranking.tsv", path)
+  ranking_available <- file.exists(ranking_path) && file_size_for(ranking_path) > 0
+  # Newly generated shared-overlap sets include a small pre-ranked sidecar.
+  # For individual caller output, read ordinary peak files in full when they
+  # are reasonably sized so the menu is actually ranked across the callset,
+  # not merely across the first genomic chunk of the file.
+  read_limit <- if (ranking_available) as.integer(max_peaks) else if (info$size[[1]] <= 50 * 1024^2) -1L else scan_limit
+  peaks <- safe_read_result_table(if (ranking_available) ranking_path else path, read_limit)
   if (!NROW(peaks) || !all(c("chrom", "start", "end") %in% names(peaks))) {
     value <- empty
   } else {
@@ -3902,20 +3916,35 @@ cutrun_individual_peak_navigation <- function(path, max_peaks = 250L, scan_limit
       as.character(peaks$chrom), ":", format(start, scientific = FALSE, trim = TRUE), "-",
       format(end, scientific = FALSE, trim = TRUE)
     )
-    score_column <- intersect(c("signalValue", "score", "V4"), names(peaks))
+    score_column <- if (ranking_available) {
+      intersect(c("combined_evidence_rank"), names(peaks))
+    } else {
+      intersect(c("qValue", "pValue", "signalValue", "score", "V4"), names(peaks))
+    }
     score <- if (length(score_column)) suppressWarnings(as.numeric(peaks[[score_column[[1]]]])) else rep(NA_real_, NROW(peaks))
-    # SEACR BED files usually carry the signal in V4; MACS narrowPeak carries it
-    # in signalValue.  Within the displayed window, put the strongest calls first.
-    ranked <- order(-replace(score, !is.finite(score), -Inf), seq_len(NROW(peaks)))
+    rank_ascending <- ranking_available
+    # MACS2 stores -log10 p/q values (larger is stronger); SEACR has no
+    # p-value and is ranked by its caller signal. Shared sets are ranked by a
+    # precomputed combined caller rank, where a smaller value is stronger.
+    ranked <- if (rank_ascending) {
+      order(replace(score, !is.finite(score), Inf), seq_len(NROW(peaks)))
+    } else {
+      order(-replace(score, !is.finite(score), -Inf), seq_len(NROW(peaks)))
+    }
     ranked <- utils::head(ranked, as.integer(max_peaks))
     interval <- interval[ranked]
     score <- score[ranked]
     label <- paste0(seq_along(interval), ". ", interval)
-    if (length(score_column)) {
-      label <- paste0(label, " — signal ", format(signif(score, 4), trim = TRUE))
+    if (ranking_available && "combined_evidence_rank" %in% names(peaks)) {
+      a_rank <- if ("source_a_rank" %in% names(peaks)) as.character(peaks$source_a_rank[ranked]) else ""
+      b_rank <- if ("source_b_rank" %in% names(peaks)) as.character(peaks$source_b_rank[ranked]) else ""
+      label <- paste0(label, " — combined rank ", format(signif(score, 4), trim = TRUE), " (", a_rank, " + ", b_rank, ")")
+    } else if (length(score_column)) {
+      evidence_label <- if (identical(score_column[[1]], "qValue")) "MACS2 -log10(q)" else if (identical(score_column[[1]], "pValue")) "MACS2 -log10(p)" else if (score_column[[1]] %in% c("signalValue", "score")) "signal" else "SEACR signal"
+      label <- paste0(label, " — ", evidence_label, " ", format(signif(score, 4), trim = TRUE))
     }
     ext <- tolower(tools::file_ext(path))
-    total <- if (ext == "bed") cutrun_seacr_peak_total(path) else {
+    total <- if (ext == "bed") cutrun_browser_peak_total(path) else {
       summaries <- list.files(dirname(path), pattern = "_macs2_summary\\.txt$", full.names = TRUE)
       values <- if (length(summaries)) metric_file_to_named_list(summaries[[1]]) else list()
       parsed <- suppressWarnings(as.integer(values$peak_count %||% NA_character_))
@@ -4002,17 +4031,9 @@ cutrun_browser_signal_modes <- function(catalog, samples) {
 }
 
 cutrun_browser_signal_modes_for_peak_call <- function(signal_modes, tool, parameters) {
-  tool <- trimws(as.character(tool %||% ""))
-  parameters <- tolower(trimws(as.character(parameters %||% "")))
-  if (identical(tool, "SEACR")) {
-    preferred <- if (grepl("spike-in", parameters, fixed = TRUE)) "spikein" else if (grepl("cpm", parameters, fixed = TRUE)) "cpm" else if (grepl("raw", parameters, fixed = TRUE)) "raw" else signal_modes
-    available <- intersect(preferred, signal_modes)
-    return(if (length(available)) available else signal_modes)
-  }
-  if (identical(tool, "MACS2")) {
-    available <- intersect(c("cpm", "raw"), signal_modes)
-    return(if (length(available)) available else signal_modes)
-  }
+  # Peak callers consume their own recorded input (raw/SEACR norm, spike-in,
+  # or BAMPE for MACS2). This menu controls only the browser display, so never
+  # hide a valid CPM track merely because the selected caller used raw input.
   signal_modes
 }
 
@@ -6413,6 +6434,10 @@ cutrun_peak_overlap_summary_path <- function(project, source_a, source_b, sample
   sub("\\.bed$", "_summary.txt", cutrun_peak_overlap_bed(project, source_a, source_b, sample))
 }
 
+cutrun_peak_overlap_ranking_path <- function(project, source_a, source_b, sample) {
+  sub("\\.bed$", "_ranking.tsv", cutrun_peak_overlap_bed(project, source_a, source_b, sample))
+}
+
 cutrun_peak_overlap_summary_table <- function(project) {
   root <- file.path(project$data_dir, "peak_overlap")
   paths <- if (dir.exists(root)) list.files(root, pattern = "_overlap_peaks_summary\\.txt$", recursive = TRUE, full.names = TRUE) else character(0)
@@ -7190,7 +7215,15 @@ submit_cutrun_peak_overlap_jobs <- function(project, source_a, source_b, samples
     ), "peak_overlap"))
   }
   overlap_name <- cutrun_peak_overlap_name(source_a, source_b)
-  target_list <- stats::setNames(lapply(selected, function(sample) cutrun_peak_overlap_summary_path(project, source_a, source_b, sample)), selected)
+  # Require the ranking sidecar as well as the summary. This lets an existing
+  # overlap set made by an earlier version be safely rerun once to gain the
+  # evidence-ranked Genome Browser menu.
+  target_list <- stats::setNames(lapply(selected, function(sample) {
+    c(
+      cutrun_peak_overlap_summary_path(project, source_a, source_b, sample),
+      cutrun_peak_overlap_ranking_path(project, source_a, source_b, sample)
+    )
+  }), selected)
   plan <- sample_submission_plan(project, "Peak Overlap", target_list)
   if (!length(plan$samples)) return(plan$message)
   qsub <- file.path(SCRIPTS_DIR, "CUTRUN", "qsub_cutrun_peak_overlap.sh")
@@ -10451,7 +10484,8 @@ server <- function(input, output, session) {
         tool_panel("Peak Overlap", status, "Create a per-sample BED of genomic regions shared by two selected completed peak caller/settings.",
           tagList(
             uiOutput("cutrun_peak_overlap_controls_ui"),
-            tags$p(class = "muted small-note", "The output contains only the genomic intersection of the two selected peak files, merged into a standard three-column BED. Each run is stored separately under data/peak_overlap/{tool_setting__tool_setting__overlap_peaks}/ and is available in the Results Explorer and Genome Browser.")
+            tags$p(class = "muted small-note", "The output contains only the genomic intersection of the two selected peak files, merged into a standard three-column BED. Each run is stored separately under data/peak_overlap/{tool_setting__tool_setting__overlap_peaks}/ and is available in the Results Explorer and Genome Browser."),
+            tags$p(class = "muted small-note", "Shared peaks are ranked by combined caller evidence rank for the Genome Browser. SEACR signal and MACS2 q-values remain caller-specific evidence rather than being combined as incompatible p-values.")
           ),
           "run_cutrun_peak_overlap", "Submit selected peak overlaps", show_sample_progress = FALSE, show_job_actions = FALSE),
         tool_panel("Peak Annotation", status, "Annotate every completed CUT&RUN MACS2 and differential peak file with nearby genes.", tagList(
@@ -11441,9 +11475,8 @@ server <- function(input, output, session) {
       matched_igg <- cutrun_control_sample_for(p, target_sample)
       signal_samples <- unique(c(target_sample, if (nzchar(matched_igg)) matched_igg))
       signal_modes <- cutrun_browser_signal_modes(catalog, signal_samples)
-      requested_normalization <- cutrun_alignment_values(p, target_sample)[["normalization_mode"]] %||% ""
       signal_modes <- cutrun_browser_signal_modes_for_peak_call(signal_modes, selected_tool, selected_parameters)
-      default_signal_mode <- if (identical(selected_tool, "MACS2") && "cpm" %in% signal_modes) "cpm" else if (identical(requested_normalization, "spikein") && "spikein" %in% signal_modes) "spikein" else signal_modes[[1]]
+      default_signal_mode <- if ("cpm" %in% signal_modes) "cpm" else signal_modes[[1]]
       selected_signal_mode <- selected_choice(input$genome_browser_cutrun_signal_normalization, signal_modes, default_signal_mode)
       controls <- c(controls, list(
         selectInput(
@@ -11459,7 +11492,7 @@ server <- function(input, output, session) {
           choices = parameter_choices, selected = peak_path, selectize = FALSE
         ),
         selectInput(
-          "genome_browser_cutrun_signal_normalization", "Signal normalization",
+          "genome_browser_cutrun_signal_normalization", "Signal normalization for display",
           choices = stats::setNames(signal_modes, vapply(signal_modes, cutrun_browser_signal_mode_label, character(1))),
           selected = selected_signal_mode, selectize = FALSE
         ),
@@ -11606,9 +11639,8 @@ server <- function(input, output, session) {
       selected_samples <- c(target_sample, if (nzchar(matched_igg)) matched_igg)
       selected_samples <- unique(selected_samples[selected_samples %in% unique(catalog$sample)])
       signal_modes <- cutrun_browser_signal_modes(catalog, selected_samples)
-      requested_normalization <- cutrun_alignment_values(p, target_sample)[["normalization_mode"]] %||% ""
       signal_modes <- cutrun_browser_signal_modes_for_peak_call(signal_modes, selected_tool, selected_parameters)
-      default_signal_mode <- if (identical(selected_tool, "MACS2") && "cpm" %in% signal_modes) "cpm" else if (identical(requested_normalization, "spikein") && "spikein" %in% signal_modes) "spikein" else signal_modes[[1]]
+      default_signal_mode <- if ("cpm" %in% signal_modes) "cpm" else signal_modes[[1]]
       selected_signal_mode <- selected_choice(input$genome_browser_cutrun_signal_normalization, signal_modes, default_signal_mode)
       tracks <- cutrun_browser_signal_rows(catalog, selected_samples, selected_signal_mode)
       if (NROW(tracks)) {
@@ -11729,10 +11761,29 @@ server <- function(input, output, session) {
     updateTextInput(session, "genome_browser_locus", value = locus)
     session$sendCustomMessage("codespring-igv-locus", list(locus = locus))
   }, ignoreInit = TRUE)
+  # A caller/setting change should return the visualization to CPM. This does
+  # not alter either caller's input files; it only resets the browser display.
+  observeEvent(list(input$genome_browser_cutrun_tool, input$genome_browser_cutrun_parameters), {
+    p <- current_project()
+    if (!is_cutrun_project(p) || !identical(input$genome_browser_mode %||% "", "cutrun_peak")) return(invisible(NULL))
+    catalog <- genome_browser_track_catalog(p)
+    target_sample <- trimws(as.character(input$genome_browser_cutrun_sample %||% ""))
+    matched_igg <- cutrun_control_sample_for(p, target_sample)
+    modes <- cutrun_browser_signal_modes(catalog, unique(c(target_sample, if (nzchar(matched_igg)) matched_igg)))
+    if (!"cpm" %in% modes) return(invisible(NULL))
+    session$onFlushed(function() {
+      updateSelectInput(session, "genome_browser_cutrun_signal_normalization", selected = "cpm")
+    }, once = TRUE)
+  }, ignoreInit = TRUE)
   # Changing the target is a material track change (including its matched IgG),
   # rather than just a navigation change, so rebuild the small CUT&RUN view
   # immediately.  Other controls can still be adjusted before using Load.
   observeEvent(input$genome_browser_cutrun_sample, {
+    p <- current_project()
+    if (!is_cutrun_project(p) || !identical(input$genome_browser_mode %||% "", "cutrun_peak")) return(invisible(NULL))
+    send_genome_browser()
+  }, ignoreInit = TRUE)
+  observeEvent(input$genome_browser_cutrun_signal_normalization, {
     p <- current_project()
     if (!is_cutrun_project(p) || !identical(input$genome_browser_mode %||% "", "cutrun_peak")) return(invisible(NULL))
     send_genome_browser()
